@@ -10,6 +10,13 @@ dependencies = [
   "aiohttp-socks>=0.10.1,<0.11.0",
 ]
 
+[project.scripts]
+start = "cli:entry_start"
+stop = "cli:entry_stop"
+restart = "cli:entry_restart"
+status = "cli:entry_status"
+logs = "cli:entry_logs"
+
 [dependency-groups]
 dev = [
   "pytest>=8.4.0",
@@ -21,7 +28,7 @@ requires = ["hatchling>=1.26.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/tg_codex"]
+packages = ["src"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
