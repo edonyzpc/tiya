@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from telegram.rendering import TelegramMessageRenderer
 from telegram.streaming import StreamOrchestrator
 
 
@@ -19,11 +20,13 @@ class FakeTelegramClient:
         edit_fail: bool = False,
         draft_retry_after_times: int = 0,
         edit_retry_after_times: int = 0,
+        send_message_parse_fail: bool = False,
     ):
         self.draft_fail = draft_fail
         self.edit_fail = edit_fail
         self.draft_retry_after_times = max(0, int(draft_retry_after_times))
         self.edit_retry_after_times = max(0, int(edit_retry_after_times))
+        self.send_message_parse_fail = bool(send_message_parse_fail)
         self.events = []
         self.send_message_calls = []
         self.send_message_draft_calls = []
@@ -31,9 +34,32 @@ class FakeTelegramClient:
         self.edit_message_text_calls = []
         self.delete_message_calls = []
 
-    async def send_message(self, chat_id, text, reply_to=None, reply_markup=None, message_thread_id=None):
-        self.events.append(("send_message", chat_id, text, reply_to))
-        self.send_message_calls.append((chat_id, text, reply_to))
+    async def send_message(
+        self,
+        chat_id,
+        text,
+        reply_to=None,
+        reply_markup=None,
+        message_thread_id=None,
+        parse_mode=None,
+        entities=None,
+        disable_web_page_preview=None,
+        link_preview_options=None,
+    ):
+        self.events.append(("send_message", chat_id, text, reply_to, parse_mode))
+        self.send_message_calls.append(
+            {
+                "chat_id": chat_id,
+                "text": text,
+                "reply_to": reply_to,
+                "parse_mode": parse_mode,
+                "entities": entities,
+                "disable_web_page_preview": disable_web_page_preview,
+                "link_preview_options": link_preview_options,
+            }
+        )
+        if self.send_message_parse_fail and parse_mode:
+            raise RuntimeError("can't parse entities")
 
     async def send_message_draft(
         self,
@@ -52,12 +78,33 @@ class FakeTelegramClient:
             raise RuntimeError("draft unavailable")
         return True
 
-    async def send_message_with_result(self, chat_id, text, reply_to=None, reply_markup=None, message_thread_id=None):
+    async def send_message_with_result(
+        self,
+        chat_id,
+        text,
+        reply_to=None,
+        reply_markup=None,
+        message_thread_id=None,
+        parse_mode=None,
+        entities=None,
+        disable_web_page_preview=None,
+        link_preview_options=None,
+    ):
         self.events.append(("send_message_with_result", chat_id, text, reply_to))
         self.send_message_with_result_calls.append((chat_id, text, reply_to))
         return SimpleNamespace(message_id=777)
 
-    async def edit_message_text(self, chat_id, message_id, text, fail_fast_retry_after=False):
+    async def edit_message_text(
+        self,
+        chat_id,
+        message_id,
+        text,
+        fail_fast_retry_after=False,
+        parse_mode=None,
+        entities=None,
+        disable_web_page_preview=None,
+        link_preview_options=None,
+    ):
         self.events.append(("edit_message_text", chat_id, message_id, text))
         self.edit_message_text_calls.append((chat_id, message_id, text))
         if self.edit_retry_after_times > 0:
@@ -83,6 +130,7 @@ class TestStreamOrchestrator:
         api: FakeTelegramClient,
         enabled: bool = True,
         retry_cooldown_ms: int = 800,
+        renderer: TelegramMessageRenderer | None = None,
     ) -> StreamOrchestrator:
         return StreamOrchestrator(
             api=api,
@@ -95,6 +143,7 @@ class TestStreamOrchestrator:
             retry_cooldown_ms=retry_cooldown_ms,
             max_consecutive_preview_errors=2,
             preview_failfast=True,
+            renderer=renderer,
         )
 
     @pytest.mark.asyncio
@@ -110,7 +159,7 @@ class TestStreamOrchestrator:
         assert not orchestrator.fallback_triggered
         assert len(api.send_message_draft_calls) >= 2
         assert len(api.send_message_calls) == 1
-        assert api.send_message_calls[0][1] == "final answer"
+        assert api.send_message_calls[0]["text"] == "final answer"
 
     @pytest.mark.asyncio
     async def test_draft_failure_triggers_edit_fallback_and_cleanup(self):
@@ -197,3 +246,43 @@ class TestStreamOrchestrator:
         assert orchestrator.preview_errors_total >= 1
         assert orchestrator.degraded_reason == "preview_retry_after_threshold"
         assert len(api.send_message_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_final_render_uses_html_parse_mode(self):
+        renderer = TelegramMessageRenderer(
+            enabled=True,
+            final_only=True,
+            style="strong",
+            mode="html",
+            link_preview_policy="auto",
+            fail_open=True,
+            backend="builtin",
+        )
+        api = FakeTelegramClient()
+        orchestrator = self._orchestrator(api, enabled=False, renderer=renderer)
+        await orchestrator.start()
+        await orchestrator.finalize_success("# 标题\n\n- a\n- b", reply_to=999)
+
+        assert len(api.send_message_calls) == 1
+        assert api.send_message_calls[0]["parse_mode"] == "HTML"
+        assert "<b>标题</b>" in api.send_message_calls[0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_final_render_fail_open_retries_with_plain_text(self):
+        renderer = TelegramMessageRenderer(
+            enabled=True,
+            final_only=True,
+            style="strong",
+            mode="html",
+            link_preview_policy="auto",
+            fail_open=True,
+            backend="builtin",
+        )
+        api = FakeTelegramClient(send_message_parse_fail=True)
+        orchestrator = self._orchestrator(api, enabled=False, renderer=renderer)
+        await orchestrator.start()
+        await orchestrator.finalize_success("```python\nprint(1)\n```", reply_to=999)
+
+        assert len(api.send_message_calls) == 2
+        assert api.send_message_calls[0]["parse_mode"] == "HTML"
+        assert api.send_message_calls[1]["parse_mode"] is None

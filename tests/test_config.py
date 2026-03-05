@@ -48,6 +48,13 @@ def test_load_config_defaults(monkeypatch, tmp_path: Path):
     assert config.tg_stream_retry_cooldown_ms == 15000
     assert config.tg_stream_max_consecutive_preview_errors == 2
     assert config.tg_stream_preview_failfast is True
+    assert config.tg_formatting_enabled is True
+    assert config.tg_formatting_final_only is True
+    assert config.tg_formatting_style == "strong"
+    assert config.tg_formatting_mode == "html"
+    assert config.tg_link_preview_policy == "auto"
+    assert config.tg_formatting_fail_open is True
+    assert config.tg_formatting_backend == "builtin"
 
 
 def test_resolve_tg_proxy_precedence(monkeypatch):

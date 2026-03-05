@@ -8,6 +8,7 @@ from aiogram import Bot, Dispatcher
 from domain.models import AgentRunResult
 from services.session_store import ClaudeSessionStore, CodexSessionStore
 from services.state_store import StateStore
+from telegram.rendering import TelegramMessageRenderer
 from telegram.router import TgCodexService, build_router
 
 
@@ -20,7 +21,18 @@ class FakeTelegramClient:
         self.delete_message_calls = []
         self.answer_callback_query_calls = []
 
-    async def send_message(self, chat_id, text, reply_to=None, reply_markup=None, message_thread_id=None):
+    async def send_message(
+        self,
+        chat_id,
+        text,
+        reply_to=None,
+        reply_markup=None,
+        message_thread_id=None,
+        parse_mode=None,
+        entities=None,
+        disable_web_page_preview=None,
+        link_preview_options=None,
+    ):
         self.send_message_calls.append(
             {
                 "chat_id": chat_id,
@@ -28,15 +40,31 @@ class FakeTelegramClient:
                 "reply_to": reply_to,
                 "reply_markup": reply_markup,
                 "message_thread_id": message_thread_id,
+                "parse_mode": parse_mode,
+                "entities": entities,
+                "disable_web_page_preview": disable_web_page_preview,
+                "link_preview_options": link_preview_options,
             }
         )
 
-    async def send_message_with_result(self, chat_id, text, reply_to=None, reply_markup=None, message_thread_id=None):
+    async def send_message_with_result(
+        self,
+        chat_id,
+        text,
+        reply_to=None,
+        reply_markup=None,
+        message_thread_id=None,
+        parse_mode=None,
+        entities=None,
+        disable_web_page_preview=None,
+        link_preview_options=None,
+    ):
         self.send_message_with_result_calls.append(
             {
                 "chat_id": chat_id,
                 "text": text,
                 "reply_to": reply_to,
+                "parse_mode": parse_mode,
             }
         )
         return SimpleNamespace(message_id=777)
@@ -58,12 +86,23 @@ class FakeTelegramClient:
         )
         return True
 
-    async def edit_message_text(self, chat_id, message_id, text, fail_fast_retry_after=False):
+    async def edit_message_text(
+        self,
+        chat_id,
+        message_id,
+        text,
+        fail_fast_retry_after=False,
+        parse_mode=None,
+        entities=None,
+        disable_web_page_preview=None,
+        link_preview_options=None,
+    ):
         self.edit_message_text_calls.append(
             {
                 "chat_id": chat_id,
                 "message_id": message_id,
                 "text": text,
+                "parse_mode": parse_mode,
             }
         )
         return True
@@ -206,6 +245,15 @@ def _build_service(
     claude_runner = FakeRunner("claude")
     state = StateStore(tmp_path / "state.json", default_provider="codex")
     codex_root, claude_root = session_roots
+    renderer = TelegramMessageRenderer(
+        enabled=True,
+        final_only=True,
+        style="strong",
+        mode="html",
+        link_preview_policy="auto",
+        fail_open=True,
+        backend="builtin",
+    )
 
     service = TgCodexService(
         api=api,
@@ -231,6 +279,7 @@ def _build_service(
         stream_retry_cooldown_ms=15000,
         stream_max_consecutive_preview_errors=2,
         stream_preview_failfast=True,
+        renderer=renderer,
     )
     return service, api, state, codex_runner, claude_runner
 
@@ -263,6 +312,7 @@ async def test_help_command_via_feed_update(bot: Bot, tmp_path: Path, session_ro
     assert api.send_message_calls
     assert "可用命令" in api.send_message_calls[-1]["text"]
     assert "/provider" in api.send_message_calls[-1]["text"]
+    assert api.send_message_calls[-1]["parse_mode"] == "HTML"
 
 
 @pytest.mark.asyncio
@@ -352,3 +402,21 @@ async def test_allowlist_block_applies_to_provider_commands(
     assert "没有权限" in api.send_message_calls[-1]["text"]
     assert codex_runner.calls == []
     assert claude_runner.calls == []
+
+
+@pytest.mark.asyncio
+async def test_status_and_history_use_rendered_html(bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]):
+    service, api, _, _, _ = _build_service(tmp_path, session_roots)
+    dp = Dispatcher()
+    dp.include_router(build_router(service))
+
+    await _feed(dp, bot, _message_update(1, "/status"))
+    await _feed(dp, bot, _message_update(2, "/history session-1 1", message_id=12))
+
+    assert len(api.send_message_calls) >= 2
+    status_msg = api.send_message_calls[-2]
+    history_msg = api.send_message_calls[-1]
+    assert status_msg["parse_mode"] == "HTML"
+    assert history_msg["parse_mode"] == "HTML"
+    assert "<b>" in status_msg["text"]
+    assert "<b>" in history_msg["text"]
