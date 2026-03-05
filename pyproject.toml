@@ -11,11 +11,11 @@ dependencies = [
 ]
 
 [project.scripts]
-start = "cli:entry_start"
-stop = "cli:entry_stop"
-restart = "cli:entry_restart"
-status = "cli:entry_status"
-logs = "cli:entry_logs"
+start = "tiya:entry_start"
+stop = "tiya:entry_stop"
+restart = "tiya:entry_restart"
+status = "tiya:entry_status"
+logs = "tiya:entry_logs"
 
 [dependency-groups]
 dev = [
