@@ -289,6 +289,15 @@ class StreamOrchestrator:
         self._preview_cooldown_until = 0.0
         self._base_preview_interval_sec = self.stream_edit_interval_ms / 1000.0
         self._adaptive_preview_interval_sec = self._base_preview_interval_sec
+        self._thinking_animation_interval_sec = max(
+            0.04,
+            min(
+                self._base_preview_interval_sec,
+                self.thinking_status_interval_ms / 1000.0,
+                0.10,
+            ),
+        )
+        self._thinking_frame_idx = 0
         self._consecutive_preview_errors = 0
 
     async def start(self) -> None:
@@ -346,7 +355,12 @@ class StreamOrchestrator:
         if self._first_output.is_set():
             return
         elapsed = int(time.monotonic() - self._started_at)
-        self._enqueue_preview_text(self._thinking_status_text(elapsed, self._thinking_marquee_frame(0)))
+        self._enqueue_preview_text(
+            self._thinking_status_text(
+                elapsed,
+                self._thinking_marquee_frame(self._thinking_frame_idx),
+            )
+        )
 
     async def finalize_success(self, final_text: str, reply_to: int) -> None:
         await self._finalize(final_text, reply_to=reply_to, failed=False)
@@ -425,33 +439,41 @@ class StreamOrchestrator:
 
     @staticmethod
     def _thinking_marquee_frame(idx: int) -> str:
-        frames = ["[>    ]", "[>>   ]", "[ >>> ]", "[  >>>]", "[   >>]", "[    >]", "[   >>]", "[  >>>]"]
-        return frames[idx % len(frames)]
+        #spinner_frames = ("|", "/", "-", "\\")
+        spinner_frames = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+        return f"{spinner_frames[idx % len(spinner_frames)]}"
 
     def _thinking_status_text(self, elapsed_sec: int, marquee: str) -> str:
-        header = f"{marquee} 思考中[{elapsed_sec}s]..."
+        header = f"{marquee} 思考中[{elapsed_sec}s]"
         hint = (self._reasoning_hint or "").strip()
         if hint:
             return f"{header}\n{hint}"
         return header
 
     async def _thinking_loop(self) -> None:
-        idx = 0
+        next_tick = time.monotonic() + self._thinking_animation_interval_sec
         while not self._thinking_stop.is_set():
+            timeout_sec = max(0.0, next_tick - time.monotonic())
             try:
                 await asyncio.wait_for(
                     self._thinking_stop.wait(),
-                    timeout=self.thinking_status_interval_ms / 1000.0,
+                    timeout=timeout_sec,
                 )
                 return
             except asyncio.TimeoutError:
                 pass
             if self._first_output.is_set():
                 return
+            self._thinking_frame_idx += 1
             elapsed = int(time.monotonic() - self._started_at)
-            status_text = self._thinking_status_text(elapsed, self._thinking_marquee_frame(idx))
-            idx += 1
+            status_text = self._thinking_status_text(
+                elapsed,
+                self._thinking_marquee_frame(self._thinking_frame_idx),
+            )
             self._enqueue_preview_text(status_text)
+            next_tick += self._thinking_animation_interval_sec
+            if next_tick < time.monotonic():
+                next_tick = time.monotonic() + self._thinking_animation_interval_sec
 
     async def _sender_loop(self) -> None:
         while not self._sender_stop.is_set():
@@ -488,7 +510,13 @@ class StreamOrchestrator:
                 self._consecutive_preview_errors = 0
                 self._last_preview_sent_text = text
                 self._preview_dirty = self._latest_preview_text != text
-                self._next_preview_send_at = time.monotonic() + self._adaptive_preview_interval_sec
+                next_interval_sec = self._adaptive_preview_interval_sec
+                if (
+                    not self._first_output.is_set()
+                    and self._adaptive_preview_interval_sec <= self._base_preview_interval_sec
+                ):
+                    next_interval_sec = 0.0 if self._preview_dirty else self._thinking_animation_interval_sec
+                self._next_preview_send_at = time.monotonic() + next_interval_sec
                 if time.monotonic() >= self._preview_cooldown_until:
                     self._adaptive_preview_interval_sec = self._base_preview_interval_sec
                 continue
