@@ -29,12 +29,19 @@ class TelegramClient:
         self.request_retry_base_ms = max(0, int(request_retry_base_ms))
         self.request_retry_max_ms = max(self.request_retry_base_ms, int(request_retry_max_ms))
 
-    async def _call_with_retries(self, method: str, call: Callable[[], Awaitable[Any]]) -> Any:
+    async def _call_with_retries(
+        self,
+        method: str,
+        call: Callable[[], Awaitable[Any]],
+        fail_fast_retry_after: bool = False,
+    ) -> Any:
         total_attempts = self.request_max_retries + 1
         for attempt in range(1, total_attempts + 1):
             try:
                 return await call()
             except TelegramRetryAfter as exc:
+                if fail_fast_retry_after:
+                    raise
                 if attempt >= total_attempts:
                     raise
                 wait_sec = max(0.0, float(exc.retry_after))
@@ -131,6 +138,7 @@ class TelegramClient:
         draft_id: int,
         text: str,
         message_thread_id: Optional[int] = None,
+        fail_fast_retry_after: bool = False,
     ) -> bool:
         async def _call() -> bool:
             return await self.bot.send_message_draft(
@@ -140,9 +148,21 @@ class TelegramClient:
                 message_thread_id=message_thread_id,
             )
 
-        return bool(await self._call_with_retries("sendMessageDraft", _call))
+        return bool(
+            await self._call_with_retries(
+                "sendMessageDraft",
+                _call,
+                fail_fast_retry_after=fail_fast_retry_after,
+            )
+        )
 
-    async def edit_message_text(self, chat_id: int, message_id: int, text: str) -> Message:
+    async def edit_message_text(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        fail_fast_retry_after: bool = False,
+    ) -> Message:
         async def _call() -> Message:
             return await self.bot.edit_message_text(
                 chat_id=chat_id,
@@ -150,7 +170,11 @@ class TelegramClient:
                 text=text,
             )
 
-        return await self._call_with_retries("editMessageText", _call)
+        return await self._call_with_retries(
+            "editMessageText",
+            _call,
+            fail_fast_retry_after=fail_fast_retry_after,
+        )
 
     async def delete_message(self, chat_id: int, message_id: int) -> bool:
         async def _call() -> bool:

@@ -41,6 +41,9 @@ class TgCodexService:
         stream_edit_interval_ms: int,
         stream_min_delta_chars: int,
         thinking_status_interval_ms: int,
+        stream_retry_cooldown_ms: int,
+        stream_max_consecutive_preview_errors: int,
+        stream_preview_failfast: bool,
     ):
         self.api = api
         self.session_stores = session_stores
@@ -53,6 +56,9 @@ class TgCodexService:
         self.stream_edit_interval_ms = max(200, stream_edit_interval_ms)
         self.stream_min_delta_chars = max(1, stream_min_delta_chars)
         self.thinking_status_interval_ms = max(400, thinking_status_interval_ms)
+        self.stream_retry_cooldown_ms = max(0, stream_retry_cooldown_ms)
+        self.stream_max_consecutive_preview_errors = max(1, stream_max_consecutive_preview_errors)
+        self.stream_preview_failfast = bool(stream_preview_failfast)
 
     async def setup_bot_menu(self) -> None:
         # Write command menu for default + common language overrides.
@@ -537,6 +543,9 @@ class TgCodexService:
             stream_edit_interval_ms=self.stream_edit_interval_ms,
             stream_min_delta_chars=self.stream_min_delta_chars,
             thinking_status_interval_ms=self.thinking_status_interval_ms,
+            retry_cooldown_ms=self.stream_retry_cooldown_ms,
+            max_consecutive_preview_errors=self.stream_max_consecutive_preview_errors,
+            preview_failfast=self.stream_preview_failfast,
         )
         await orchestrator.start()
 

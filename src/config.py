@@ -61,6 +61,29 @@ def parse_non_negative_int(raw: Optional[str], default: int) -> int:
     return value if value >= 0 else default
 
 
+def parse_positive_int(raw: Optional[str], default: int, minimum: int = 1) -> int:
+    if raw is None:
+        return max(minimum, default)
+    try:
+        value = int(raw.strip())
+    except (ValueError, TypeError, AttributeError):
+        return max(minimum, default)
+    return value if value >= minimum else max(minimum, default)
+
+
+def parse_bool(raw: Optional[str], default: bool) -> bool:
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if not value:
+        return default
+    if value in ("1", "true", "yes", "y", "on"):
+        return True
+    if value in ("0", "false", "no", "n", "off"):
+        return False
+    return default
+
+
 def resolve_tg_stream_enabled() -> bool:
     explicit = os.getenv("TG_STREAM_ENABLED")
     if explicit is not None and explicit.strip():
@@ -134,4 +157,15 @@ def load_config() -> AppConfig:
         tg_http_max_retries=parse_non_negative_int(env("TG_HTTP_MAX_RETRIES", "2"), 2),
         tg_http_retry_base_ms=parse_non_negative_int(env("TG_HTTP_RETRY_BASE_MS", "300"), 300),
         tg_http_retry_max_ms=parse_non_negative_int(env("TG_HTTP_RETRY_MAX_MS", "3000"), 3000),
+        tg_instance_lock_path=Path(env("TG_INSTANCE_LOCK_PATH", "./.runtime/bot.lock")).expanduser(),
+        tg_stream_retry_cooldown_ms=parse_non_negative_int(
+            env("TG_STREAM_RETRY_COOLDOWN_MS", "15000"),
+            15000,
+        ),
+        tg_stream_max_consecutive_preview_errors=parse_positive_int(
+            env("TG_STREAM_MAX_CONSECUTIVE_PREVIEW_ERRORS", "2"),
+            default=2,
+            minimum=1,
+        ),
+        tg_stream_preview_failfast=parse_bool(env("TG_STREAM_PREVIEW_FAILFAST", "1"), True),
     )

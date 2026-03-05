@@ -5,6 +5,7 @@ from aiogram.client.session.aiohttp import AiohttpSession
 
 from config import load_config
 from domain.models import AgentProvider
+from instance_lock import BotInstanceLock
 from logging_utils import log
 from services.claude_runner import ClaudeRunner
 from services.codex_runner import CodexRunner
@@ -17,6 +18,23 @@ from telegram.router import TgCodexService, build_router
 
 async def run() -> None:
     config = load_config()
+    instance_lock = BotInstanceLock(config.tg_instance_lock_path, config.telegram_token)
+    acquired, lock_owner = instance_lock.acquire()
+    if not acquired:
+        owner_pid = lock_owner.get("pid")
+        owner_started = lock_owner.get("started_at")
+        owner_cmdline = lock_owner.get("cmdline", "")
+        log(
+            "[error] instance lock rejected "
+            f"(path={instance_lock.path}, owner_pid={owner_pid}, owner_started_at={owner_started}, "
+            f"owner_cmdline={owner_cmdline[:220]!r})"
+        )
+        return
+
+    log(
+        "[info] instance lock acquired "
+        f"(path={instance_lock.path}, token_hash={instance_lock.token_digest}, pid={lock_owner.get('pid')})"
+    )
 
     if config.dangerous_bypass_level == 1:
         log("[warn] CODEX_DANGEROUS_BYPASS=1, enabling sandbox_mode=danger-full-access and approval_policy=never")
@@ -28,7 +46,10 @@ async def run() -> None:
             "[info] TG streaming enabled "
             f"(edit interval: {config.stream_edit_interval_ms}ms, "
             f"min delta: {config.stream_min_delta_chars}, "
-            f"thinking interval: {config.thinking_status_interval_ms}ms)"
+            f"thinking interval: {config.thinking_status_interval_ms}ms, "
+            f"retry cooldown: {config.tg_stream_retry_cooldown_ms}ms, "
+            f"max preview errors: {config.tg_stream_max_consecutive_preview_errors}, "
+            f"preview failfast: {str(config.tg_stream_preview_failfast).lower()})"
         )
     else:
         log("[info] TG streaming disabled")
@@ -93,22 +114,29 @@ async def run() -> None:
         stream_edit_interval_ms=config.stream_edit_interval_ms,
         stream_min_delta_chars=config.stream_min_delta_chars,
         thinking_status_interval_ms=config.thinking_status_interval_ms,
+        stream_retry_cooldown_ms=config.tg_stream_retry_cooldown_ms,
+        stream_max_consecutive_preview_errors=config.tg_stream_max_consecutive_preview_errors,
+        stream_preview_failfast=config.tg_stream_preview_failfast,
     )
 
     dispatcher = Dispatcher()
     dispatcher.include_router(build_router(service))
 
     try:
-        await service.setup_bot_menu()
-        log("bot command menu configured")
-    except Exception as exc:
-        log(f"bot command menu setup failed: {exc}")
+        try:
+            await service.setup_bot_menu()
+            log("bot command menu configured")
+        except Exception as exc:
+            log(f"bot command menu setup failed: {exc}")
 
-    log("tiya service started")
-    try:
-        await dispatcher.start_polling(bot)
+        log("tiya service started")
+        try:
+            await dispatcher.start_polling(bot)
+        finally:
+            await bot.session.close()
     finally:
-        await bot.session.close()
+        instance_lock.release()
+        log(f"[info] instance lock released (path={instance_lock.path})")
 
 
 def main() -> None:

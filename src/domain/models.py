@@ -34,6 +34,10 @@ class StreamSummary:
     updates_total: int
     throttled_total: int
     fallback_triggered: bool
+    preview_errors_total: int
+    retry_after_total: int
+    degraded_reason: str
+    degraded_at_ms: int
     final_send_ms: int
     exit_code: int
 
@@ -62,3 +66,7 @@ class AppConfig:
     tg_http_max_retries: int
     tg_http_retry_base_ms: int
     tg_http_retry_max_ms: int
+    tg_instance_lock_path: Path
+    tg_stream_retry_cooldown_ms: int
+    tg_stream_max_consecutive_preview_errors: int
+    tg_stream_preview_failfast: bool

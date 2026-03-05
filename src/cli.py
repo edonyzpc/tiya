@@ -10,6 +10,8 @@ import time
 from pathlib import Path
 from typing import MutableMapping, Optional
 
+from instance_lock import BotInstanceLock
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RUNTIME_DIR = REPO_ROOT / ".runtime"
@@ -276,6 +278,7 @@ def _resolve_stream_enabled() -> str:
 
 
 def _build_child_env() -> dict[str, str]:
+    default_lock_path = str((RUNTIME_DIR / "bot.lock"))
     child_env = dict(os.environ)
     child_env.update(
         {
@@ -302,6 +305,13 @@ def _build_child_env() -> dict[str, str]:
             "TG_HTTP_MAX_RETRIES": _env_or_default("TG_HTTP_MAX_RETRIES", "2"),
             "TG_HTTP_RETRY_BASE_MS": _env_or_default("TG_HTTP_RETRY_BASE_MS", "300"),
             "TG_HTTP_RETRY_MAX_MS": _env_or_default("TG_HTTP_RETRY_MAX_MS", "3000"),
+            "TG_INSTANCE_LOCK_PATH": _env_or_default("TG_INSTANCE_LOCK_PATH", default_lock_path),
+            "TG_STREAM_RETRY_COOLDOWN_MS": _env_or_default("TG_STREAM_RETRY_COOLDOWN_MS", "15000"),
+            "TG_STREAM_MAX_CONSECUTIVE_PREVIEW_ERRORS": _env_or_default(
+                "TG_STREAM_MAX_CONSECUTIVE_PREVIEW_ERRORS",
+                "2",
+            ),
+            "TG_STREAM_PREVIEW_FAILFAST": _env_or_default("TG_STREAM_PREVIEW_FAILFAST", "1"),
         }
     )
 
@@ -310,6 +320,34 @@ def _build_child_env() -> dict[str, str]:
         child_env["TELEGRAM_ENABLE_DRAFT_STREAM"] = legacy_stream
 
     return child_env
+
+
+def _resolve_instance_lock_path(environ: MutableMapping[str, str]) -> Path:
+    raw = _env_value(environ, "TG_INSTANCE_LOCK_PATH")
+    if raw:
+        return Path(raw).expanduser()
+    return RUNTIME_DIR / "bot.lock"
+
+
+def _probe_instance_lock(environ: MutableMapping[str, str]) -> tuple[bool, str]:
+    token = _env_value(environ, "TELEGRAM_BOT_TOKEN")
+    if not token:
+        return True, ""
+
+    lock = BotInstanceLock(_resolve_instance_lock_path(environ), token)
+    acquired, payload = lock.acquire()
+    if acquired:
+        lock.release()
+        return True, ""
+
+    owner_pid = payload.get("pid")
+    owner_started = payload.get("started_at")
+    owner_cmdline = str(payload.get("cmdline", "") or "")
+    msg = (
+        f"path={lock.path} owner_pid={owner_pid} owner_started_at={owner_started} "
+        f"owner_cmdline={owner_cmdline[:220]!r}"
+    )
+    return False, msg
 
 
 def _tail_last_lines(path: Path, lines: int = 10) -> list[str]:
@@ -335,11 +373,6 @@ def _ensure_runtime_dir() -> None:
 def start() -> int:
     _ensure_runtime_dir()
 
-    running, pid = tg_is_running()
-    if running and pid is not None:
-        print(f"[info] Telegram 已运行，PID={pid}")
-        return 0
-
     validate_tg_config()
     validate_shared_config()
 
@@ -354,6 +387,16 @@ def start() -> int:
         raise CliError(f"启动入口不存在: {BOT_ENTRY}")
 
     child_env = _build_child_env()
+    lock_ok, lock_msg = _probe_instance_lock(child_env)
+    if not lock_ok:
+        print(f"[error] 检测到同 token 实例已运行，拒绝启动: {lock_msg}")
+        print("[hint] 请先执行 uv run stop，或手动停止占用进程后重试。")
+        return 1
+
+    running, pid = tg_is_running()
+    if running and pid is not None:
+        print(f"[info] Telegram 已运行，PID={pid}")
+        return 0
 
     print("[info] 启动 Telegram 服务...")
     with LOG_FILE.open("ab") as log_fp:
@@ -477,4 +520,3 @@ def entry_status() -> int:
 
 def entry_logs() -> int:
     return _run(logs)
-
