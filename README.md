@@ -45,6 +45,9 @@ DEFAULT_PROVIDER="codex"
 CODEX_BIN="codex"
 CLAUDE_BIN="claude"
 TG_STREAM_ENABLED=1
+TG_FORMATTING_ENABLED=1
+TG_FORMATTING_MODE="html"
+TG_FORMATTING_STYLE="strong"
 ```
 
 Environment variables:
@@ -64,6 +67,15 @@ export TG_THINKING_STATUS_INTERVAL_MS=900
 export TG_STREAM_RETRY_COOLDOWN_MS=15000
 export TG_STREAM_MAX_CONSECUTIVE_PREVIEW_ERRORS=2
 export TG_STREAM_PREVIEW_FAILFAST=1
+
+# Message formatting / rendering
+export TG_FORMATTING_ENABLED=1
+export TG_FORMATTING_FINAL_ONLY=1
+export TG_FORMATTING_STYLE="strong"                  # light | medium | strong
+export TG_FORMATTING_MODE="html"                     # html | plain
+export TG_LINK_PREVIEW_POLICY="auto"                 # auto | off
+export TG_FORMATTING_FAIL_OPEN=1
+export TG_FORMATTING_BACKEND="builtin"               # builtin | telegramify | sulguk
 
 # HTTP retry
 export TG_HTTP_MAX_RETRIES=2
