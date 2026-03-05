@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
-from tg_codex.domain.models import AgentRunResult
+from domain.models import AgentRunResult
 
 
 class CodexRunner:

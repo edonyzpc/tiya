@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Optional, Protocol
 from uuid import UUID
 
-from tg_codex.domain.models import SessionMeta
+from domain.models import SessionMeta
 
 
 class SessionStoreProtocol(Protocol):

@@ -3,7 +3,7 @@ import shutil
 from pathlib import Path
 from typing import Optional, cast
 
-from .domain.models import AgentProvider, AppConfig
+from domain.models import AgentProvider, AppConfig
 
 
 def env(name: str, default: Optional[str] = None) -> Optional[str]:

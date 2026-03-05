@@ -6,13 +6,13 @@ import os
 from aiogram import Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from tg_codex.domain.models import AgentProvider
-from tg_codex.logging_utils import log
-from tg_codex.services.runner_protocol import RunnerProtocol
-from tg_codex.services.session_store import CodexSessionStore, SessionStoreProtocol
-from tg_codex.services.state_store import StateStore
-from tg_codex.telegram.client import TelegramClient
-from tg_codex.telegram.streaming import StreamOrchestrator, TypingStatus
+from domain.models import AgentProvider
+from logging_utils import log
+from services.runner_protocol import RunnerProtocol
+from services.session_store import CodexSessionStore, SessionStoreProtocol
+from services.state_store import StateStore
+from telegram.client import TelegramClient
+from telegram.streaming import StreamOrchestrator, TypingStatus
 
 BOT_COMMANDS: list[dict[str, str]] = [
     {"command": "start", "description": "开始使用"},

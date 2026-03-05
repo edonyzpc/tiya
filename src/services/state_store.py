@@ -3,7 +3,7 @@ import threading
 from pathlib import Path
 from typing import Any, Optional, cast
 
-from tg_codex.domain.models import AgentProvider
+from domain.models import AgentProvider
 
 _PROVIDERS: tuple[AgentProvider, AgentProvider] = ("codex", "claude")
 

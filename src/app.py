@@ -3,16 +3,16 @@ import asyncio
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
 
-from tg_codex.config import load_config
-from tg_codex.domain.models import AgentProvider
-from tg_codex.logging_utils import log
-from tg_codex.services.claude_runner import ClaudeRunner
-from tg_codex.services.codex_runner import CodexRunner
-from tg_codex.services.runner_protocol import RunnerProtocol
-from tg_codex.services.session_store import ClaudeSessionStore, CodexSessionStore
-from tg_codex.services.state_store import StateStore
-from tg_codex.telegram.client import TelegramClient
-from tg_codex.telegram.router import TgCodexService, build_router
+from config import load_config
+from domain.models import AgentProvider
+from logging_utils import log
+from services.claude_runner import ClaudeRunner
+from services.codex_runner import CodexRunner
+from services.runner_protocol import RunnerProtocol
+from services.session_store import ClaudeSessionStore, CodexSessionStore
+from services.state_store import StateStore
+from telegram.client import TelegramClient
+from telegram.router import TgCodexService, build_router
 
 
 async def run() -> None:

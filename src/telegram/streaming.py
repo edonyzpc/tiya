@@ -2,9 +2,9 @@ import asyncio
 import time
 from typing import Optional
 
-from tg_codex.domain.models import StreamSummary
-from tg_codex.logging_utils import log
-from tg_codex.telegram.client import MAX_TELEGRAM_TEXT, TelegramClient
+from domain.models import StreamSummary
+from logging_utils import log
+from telegram.client import MAX_TELEGRAM_TEXT, TelegramClient
 
 
 class TypingStatus:
