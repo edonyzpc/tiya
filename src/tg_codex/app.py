@@ -4,9 +4,12 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
 
 from tg_codex.config import load_config
+from tg_codex.domain.models import AgentProvider
 from tg_codex.logging_utils import log
+from tg_codex.services.claude_runner import ClaudeRunner
 from tg_codex.services.codex_runner import CodexRunner
-from tg_codex.services.session_store import SessionStore
+from tg_codex.services.runner_protocol import RunnerProtocol
+from tg_codex.services.session_store import ClaudeSessionStore, CodexSessionStore
 from tg_codex.services.state_store import StateStore
 from tg_codex.telegram.client import TelegramClient
 from tg_codex.telegram.router import TgCodexService, build_router
@@ -48,20 +51,42 @@ async def run() -> None:
         request_retry_max_ms=config.tg_http_retry_max_ms,
     )
 
-    sessions = SessionStore(config.session_root)
-    state = StateStore(config.state_path)
+    session_stores = {
+        "codex": CodexSessionStore(config.codex_session_root),
+        "claude": ClaudeSessionStore(config.claude_session_root),
+    }
+    state = StateStore(config.state_path, default_provider=config.default_provider)
     codex = CodexRunner(
         codex_bin=config.codex_bin,
         sandbox_mode=config.codex_sandbox_mode,
         approval_policy=config.codex_approval_policy,
         dangerous_bypass_level=config.dangerous_bypass_level,
     )
+    claude = ClaudeRunner(
+        claude_bin=config.claude_bin,
+        model=config.claude_model,
+        permission_mode=config.claude_permission_mode,
+    )
+    runners: dict[AgentProvider, RunnerProtocol] = {
+        "codex": codex,
+        "claude": claude,
+    }
+    runner_bins = {
+        "codex": config.codex_bin,
+        "claude": config.claude_bin,
+    }
+
+    log(
+        "[info] provider defaults "
+        f"(active={config.default_provider}, codex_bin={config.codex_bin}, claude_bin={config.claude_bin})"
+    )
 
     service = TgCodexService(
         api=api,
-        sessions=sessions,
+        session_stores=session_stores,
         state=state,
-        codex=codex,
+        runners=runners,
+        runner_bins=runner_bins,
         default_cwd=config.default_cwd,
         allowed_user_ids=config.allowed_user_ids,
         stream_enabled=config.stream_enabled,
@@ -79,7 +104,7 @@ async def run() -> None:
     except Exception as exc:
         log(f"bot command menu setup failed: {exc}")
 
-    log("tg-codex service started")
+    log("tiya service started")
     try:
         await dispatcher.start_polling(bot)
     finally:

@@ -1,12 +1,12 @@
 # Telegram Setup Guide
 
-This guide explains how to run `tg-codex` with the current `aiogram + uv` architecture.
+This guide explains how to run `tiya` with the current `aiogram + uv` architecture.
 
 ## Requirements
 
 - Python 3.10+
 - `uv`
-- Local `codex` CLI installed and logged in
+- Local `codex` and/or `claude` CLI installed and logged in
 - A Telegram bot token from `@BotFather`
 
 ## 1) Install dependencies
@@ -23,9 +23,16 @@ uv sync --group dev
 export TELEGRAM_BOT_TOKEN="123456:xxxx"
 export ALLOWED_TELEGRAM_USER_IDS="123456789"  # optional but recommended
 
+export DEFAULT_PROVIDER="codex"                # codex or claude
 export DEFAULT_CWD="/path/to/project"
+
 export CODEX_BIN="codex"
 export CODEX_SESSION_ROOT="$HOME/.codex/sessions"
+
+export CLAUDE_BIN="claude"
+export CLAUDE_SESSION_ROOT="$HOME/.claude/projects"
+export CLAUDE_MODEL=""                         # optional
+export CLAUDE_PERMISSION_MODE="default"
 
 export TG_STREAM_ENABLED=1
 export TG_STREAM_EDIT_INTERVAL_MS=700
@@ -35,7 +42,7 @@ export TG_THINKING_STATUS_INTERVAL_MS=900
 export TG_HTTP_MAX_RETRIES=2
 export TG_HTTP_RETRY_BASE_MS=300
 export TG_HTTP_RETRY_MAX_MS=3000
-export TG_PROXY_URL="http://127.0.0.1:7897"  # optional, or rely on HTTPS_PROXY/http_proxy
+export TG_PROXY_URL="http://127.0.0.1:7897"   # optional, or rely on HTTPS_PROXY/http_proxy
 ```
 
 ## 3) Start service
@@ -51,9 +58,19 @@ export TG_PROXY_URL="http://127.0.0.1:7897"  # optional, or rely on HTTPS_PROXY/
 ./run.sh logs
 ```
 
-If logs show `tg-codex service started`, the bot is running.
+If logs show `tiya service started`, the bot is running.
 
-## 5) Stop / restart
+## 5) Switch provider in Telegram
+
+Use:
+
+```text
+/provider
+/provider claude
+/provider codex
+```
+
+## 6) Stop / restart
 
 ```bash
 ./run.sh stop

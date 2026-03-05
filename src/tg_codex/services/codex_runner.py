@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
-from tg_codex.domain.models import CodexRunResult
+from tg_codex.domain.models import AgentRunResult
 
 
 class CodexRunner:
@@ -26,6 +26,17 @@ class CodexRunner:
         escaped = value.replace("\\", "\\\\").replace('"', '\\"')
         return f'"{escaped}"'
 
+    def _format_spawn_error(self, exc: FileNotFoundError) -> str:
+        filename = str(getattr(exc, "filename", "") or "").strip()
+        bin_candidates = {
+            self.codex_bin,
+            str(Path(self.codex_bin).expanduser()),
+            Path(self.codex_bin).name,
+        }
+        if filename and filename not in bin_candidates:
+            return f"工作目录不存在或不可访问: {filename}"
+        return f"找不到 codex 可执行文件: {self.codex_bin}"
+
     async def run_prompt(
         self,
         prompt: str,
@@ -33,7 +44,7 @@ class CodexRunner:
         session_id: Optional[str] = None,
         on_partial: Optional[Callable[[str], Awaitable[None]]] = None,
         on_reasoning: Optional[Callable[[str], Awaitable[None]]] = None,
-    ) -> CodexRunResult:
+    ) -> AgentRunResult:
         config_flags: list[str] = []
         if self.dangerous_bypass_level == 1:
             sandbox_mode = self.sandbox_mode or "danger-full-access"
@@ -80,9 +91,9 @@ class CodexRunner:
                 stderr=asyncio.subprocess.PIPE,
             )
         except FileNotFoundError as exc:
-            return CodexRunResult(
+            return AgentRunResult(
                 thread_id=None,
-                answer=f"找不到 codex 可执行文件: {self.codex_bin}",
+                answer=self._format_spawn_error(exc),
                 stderr_text=str(exc),
                 return_code=127,
             )
@@ -157,7 +168,7 @@ class CodexRunner:
             else:
                 agent_text = "Codex 没有返回可展示内容。"
 
-        return CodexRunResult(
+        return AgentRunResult(
             thread_id=thread_id,
             answer=agent_text,
             stderr_text=stderr_text,

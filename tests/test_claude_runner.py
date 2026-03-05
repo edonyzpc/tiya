@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from tg_codex.services.codex_runner import CodexRunner
+from tg_codex.services.claude_runner import ClaudeRunner
 
 
 class _FakeStream:
@@ -29,12 +29,14 @@ class _FakeProcess:
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_stream_extracts_thread_and_partial(monkeypatch, tmp_path: Path):
+async def test_run_prompt_stream_extracts_session_partial_and_reasoning(monkeypatch, tmp_path: Path):
     proc = _FakeProcess(
         stdout_lines=[
-            '{"type":"thread.started","thread_id":"thread-1"}',
-            '{"type":"item.delta","item":{"id":"a","type":"agent_message"},"delta":"Hello"}',
-            '{"type":"item.delta","item":{"id":"a","type":"agent_message"},"delta":" world"}',
+            '{"type":"system","session_id":"session-claude-1"}',
+            '{"type":"stream_event","session_id":"session-claude-1","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"**Planning**"}}}',
+            '{"type":"stream_event","session_id":"session-claude-1","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}}}',
+            '{"type":"stream_event","session_id":"session-claude-1","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":" world"}}}',
+            '{"type":"result","session_id":"session-claude-1","result":"Hello world"}',
         ],
         stderr_lines=[],
         return_code=0,
@@ -43,51 +45,49 @@ async def test_run_prompt_stream_extracts_thread_and_partial(monkeypatch, tmp_pa
     async def _fake_create(*args, **kwargs):
         return proc
 
-    monkeypatch.setattr("tg_codex.services.codex_runner.asyncio.create_subprocess_exec", _fake_create)
+    monkeypatch.setattr("tg_codex.services.claude_runner.asyncio.create_subprocess_exec", _fake_create)
 
     partials: list[str] = []
+    reasoning: list[str] = []
 
     async def _on_partial(text: str) -> None:
         partials.append(text)
 
-    runner = CodexRunner(codex_bin="codex")
-    result = await runner.run_prompt("hi", tmp_path, on_partial=_on_partial)
+    async def _on_reasoning(text: str) -> None:
+        reasoning.append(text)
 
-    assert result.thread_id == "thread-1"
+    runner = ClaudeRunner(claude_bin="claude")
+    result = await runner.run_prompt("hi", tmp_path, on_partial=_on_partial, on_reasoning=_on_reasoning)
+
+    assert result.thread_id == "session-claude-1"
     assert result.answer == "Hello world"
     assert result.return_code == 0
     assert partials[-1] == "Hello world"
+    assert reasoning[-1] == "Planning"
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_emits_reasoning_summary(monkeypatch, tmp_path: Path):
+async def test_run_prompt_resume_uses_r_flag(monkeypatch, tmp_path: Path):
     proc = _FakeProcess(
-        stdout_lines=[
-            '{"type":"item.completed","item":{"type":"reasoning","summary":[{"type":"summary_text","text":"**Planning** next step"}]}}',
-            '{"type":"item.completed","item":{"type":"reasoning","summary":"**Planning** next step"}}',
-            '{"type":"item.completed","item":{"type":"reasoning","summary":"Finalizing output"}}',
-            '{"type":"item.completed","item":{"id":"a","type":"agent_message","text":"done"}}',
-        ],
+        stdout_lines=['{"type":"result","session_id":"sid-2","result":"ok"}'],
         stderr_lines=[],
         return_code=0,
     )
+    captured_args: list[str] = []
 
     async def _fake_create(*args, **kwargs):
+        captured_args.extend([str(v) for v in args])
         return proc
 
-    monkeypatch.setattr("tg_codex.services.codex_runner.asyncio.create_subprocess_exec", _fake_create)
+    monkeypatch.setattr("tg_codex.services.claude_runner.asyncio.create_subprocess_exec", _fake_create)
 
-    reasoning_updates: list[str] = []
-
-    async def _on_reasoning(text: str) -> None:
-        reasoning_updates.append(text)
-
-    runner = CodexRunner(codex_bin="codex")
-    result = await runner.run_prompt("hi", tmp_path, on_reasoning=_on_reasoning)
+    runner = ClaudeRunner(claude_bin="claude", model="sonnet", permission_mode="default")
+    result = await runner.run_prompt("hello", tmp_path, session_id="resume-sid")
 
     assert result.return_code == 0
-    assert result.answer == "done"
-    assert reasoning_updates == ["Planning next step", "Finalizing output"]
+    assert "-r" in captured_args
+    idx = captured_args.index("-r")
+    assert captured_args[idx + 1] == "resume-sid"
 
 
 @pytest.mark.asyncio
@@ -101,9 +101,9 @@ async def test_run_prompt_non_zero_exit_uses_merged_output(monkeypatch, tmp_path
     async def _fake_create(*args, **kwargs):
         return proc
 
-    monkeypatch.setattr("tg_codex.services.codex_runner.asyncio.create_subprocess_exec", _fake_create)
+    monkeypatch.setattr("tg_codex.services.claude_runner.asyncio.create_subprocess_exec", _fake_create)
 
-    runner = CodexRunner(codex_bin="codex")
+    runner = ClaudeRunner(claude_bin="claude")
     result = await runner.run_prompt("hi", tmp_path)
 
     assert result.return_code == 2
@@ -116,13 +116,13 @@ async def test_run_prompt_handles_missing_binary(monkeypatch, tmp_path: Path):
     async def _fake_create(*args, **kwargs):
         raise FileNotFoundError("not found")
 
-    monkeypatch.setattr("tg_codex.services.codex_runner.asyncio.create_subprocess_exec", _fake_create)
+    monkeypatch.setattr("tg_codex.services.claude_runner.asyncio.create_subprocess_exec", _fake_create)
 
-    runner = CodexRunner(codex_bin="/missing/codex")
+    runner = ClaudeRunner(claude_bin="/missing/claude")
     result = await runner.run_prompt("hi", tmp_path)
 
     assert result.return_code == 127
-    assert "找不到 codex 可执行文件" in result.answer
+    assert "找不到 claude 可执行文件" in result.answer
 
 
 @pytest.mark.asyncio
@@ -130,9 +130,9 @@ async def test_run_prompt_handles_missing_cwd(monkeypatch, tmp_path: Path):
     async def _fake_create(*args, **kwargs):
         raise FileNotFoundError(2, "No such file or directory", "tiya")
 
-    monkeypatch.setattr("tg_codex.services.codex_runner.asyncio.create_subprocess_exec", _fake_create)
+    monkeypatch.setattr("tg_codex.services.claude_runner.asyncio.create_subprocess_exec", _fake_create)
 
-    runner = CodexRunner(codex_bin="codex")
+    runner = ClaudeRunner(claude_bin="claude")
     result = await runner.run_prompt("hi", tmp_path / "missing-cwd")
 
     assert result.return_code == 127

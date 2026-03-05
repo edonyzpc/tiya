@@ -1,14 +1,15 @@
-# tg-codex
+# tiya
 
 语言: [English](README.md) | 简体中文
 
-`tg-codex` 用于在 Telegram 中继续本地 `codex` 会话。
+`tiya` 用于在 Telegram 中继续本地 `codex` 与 `claude` 会话。
 
 ## 特性
 
 - 基于 `aiogram`（异步）
 - 仅支持长轮询（不含 webhook）
-- 支持本地会话列表/切换/历史查看
+- 通过 `/provider codex|claude` 运行时切换 provider
+- 两个 provider 都支持会话列表/切换/历史
 - 私聊流式回退链：
   - `sendMessageDraft`
   - `editMessageText`
@@ -19,7 +20,7 @@
 
 - Python 3.10+
 - `uv`
-- 本地已安装并登录 `codex` CLI
+- 本地已安装并登录 `codex` 和/或 `claude` CLI
 - Telegram Bot Token
 
 ## 快速开始
@@ -40,7 +41,9 @@ uv sync --group dev
 TELEGRAM_BOT_TOKEN="your bot token"
 ALLOWED_TELEGRAM_USER_IDS="123456789"
 DEFAULT_CWD="/path/to/your/project"
+DEFAULT_PROVIDER="codex"
 CODEX_BIN="codex"
+CLAUDE_BIN="claude"
 TG_STREAM_ENABLED=1
 ```
 
@@ -49,6 +52,9 @@ TG_STREAM_ENABLED=1
 ```bash
 export TELEGRAM_BOT_TOKEN="your bot token"
 export ALLOWED_TELEGRAM_USER_IDS="123456789"         # 可选，推荐
+
+# Provider
+export DEFAULT_PROVIDER=codex                         # codex 或 claude
 
 # 流式参数
 export TG_STREAM_ENABLED=1
@@ -69,6 +75,12 @@ export CODEX_SESSION_ROOT="$HOME/.codex/sessions"
 export CODEX_SANDBOX_MODE=""
 export CODEX_APPROVAL_POLICY=""
 export CODEX_DANGEROUS_BYPASS=0
+
+# Claude
+export CLAUDE_BIN="claude"
+export CLAUDE_SESSION_ROOT="$HOME/.claude/projects"
+export CLAUDE_MODEL=""                                # 可选
+export CLAUDE_PERMISSION_MODE="default"
 ```
 
 ### 3) 启动
@@ -89,6 +101,7 @@ export CODEX_DANGEROUS_BYPASS=0
 ## 支持命令
 
 - `/help`
+- `/provider [codex|claude]`
 - `/sessions [N]`
 - `/use <index|session_id>`
 - `/history [index|session_id] [N]`
@@ -106,8 +119,9 @@ export CODEX_DANGEROUS_BYPASS=0
 - `src/tg_codex/telegram/streaming.py`：流式编排
 - `src/tg_codex/telegram/client.py`：Telegram API 封装（含重试）
 - `src/tg_codex/services/codex_runner.py`：异步 Codex 子进程执行
-- `src/tg_codex/services/session_store.py`：会话与历史读取
-- `src/tg_codex/services/state_store.py`：JSON 状态持久化
+- `src/tg_codex/services/claude_runner.py`：异步 Claude 子进程执行
+- `src/tg_codex/services/session_store.py`：按 provider 的会话与历史读取
+- `src/tg_codex/services/state_store.py`：按 provider 的 JSON 状态持久化
 - `tests/`：pytest 测试集
 
 ## 测试
@@ -123,8 +137,10 @@ uv run pytest
 
 ## 简单 Prompt 很慢时的排查
 
-如果 Telegram 中长时间停留在 `思考中...`，通常瓶颈不在 Telegram 发消息，而在 `codex` 子进程的网络链路。
+如果 Telegram 中长时间停留在 `思考中...`，通常瓶颈不在 Telegram 发消息，而在模型子进程的网络链路。
 
 - 检查代理变量是否可用（`TG_PROXY_URL` 或 `HTTPS_PROXY`）。
-- 在同一 shell 里直接执行 `codex exec --json --skip-git-repo-check \"你是谁？\"` 看是否快速返回。
-- 最新 `run.sh` 已做代理变量名标准化（大小写），避免因代理变量传递异常导致长时间无首 token。
+- 在同一 shell 里直接执行：
+  - `codex exec --json --skip-git-repo-check "你是谁？"`
+  - `claude -p --verbose --output-format stream-json "你是谁？"`
+- `run.sh` 已做代理变量名标准化（大小写），避免代理变量传递异常导致长时间无首 token。

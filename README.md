@@ -1,14 +1,15 @@
-# tg-codex
+# tiya
 
 Language: English | [简体中文](README.zh-CN.md)
 
-`tg-codex` lets you continue local `codex` sessions from Telegram.
+`tiya` lets you continue local `codex` and `claude` sessions from Telegram.
 
 ## Highlights
 
 - Built on `aiogram` (async)
 - Polling mode only (no webhook)
-- Session list/switch/history for local Codex sessions
+- Runtime provider switch via `/provider codex|claude`
+- Session list/switch/history for both providers
 - Private-chat streaming with fallback chain:
   - `sendMessageDraft`
   - `editMessageText`
@@ -19,7 +20,7 @@ Language: English | [简体中文](README.zh-CN.md)
 
 - Python 3.10+
 - `uv`
-- Local `codex` CLI already installed/logged in
+- Local `codex` and/or `claude` CLI installed and logged in
 - Telegram bot token
 
 ## Quick Start
@@ -40,7 +41,9 @@ Example `.env`:
 TELEGRAM_BOT_TOKEN="your bot token"
 ALLOWED_TELEGRAM_USER_IDS="123456789"
 DEFAULT_CWD="/path/to/your/project"
+DEFAULT_PROVIDER="codex"
 CODEX_BIN="codex"
+CLAUDE_BIN="claude"
 TG_STREAM_ENABLED=1
 ```
 
@@ -49,6 +52,9 @@ Environment variables:
 ```bash
 export TELEGRAM_BOT_TOKEN="your bot token"
 export ALLOWED_TELEGRAM_USER_IDS="123456789"         # optional, recommended
+
+# Provider
+export DEFAULT_PROVIDER=codex                         # codex or claude
 
 # Streaming
 export TG_STREAM_ENABLED=1
@@ -69,6 +75,12 @@ export CODEX_SESSION_ROOT="$HOME/.codex/sessions"
 export CODEX_SANDBOX_MODE=""
 export CODEX_APPROVAL_POLICY=""
 export CODEX_DANGEROUS_BYPASS=0
+
+# Claude
+export CLAUDE_BIN="claude"
+export CLAUDE_SESSION_ROOT="$HOME/.claude/projects"
+export CLAUDE_MODEL=""                                # optional
+export CLAUDE_PERMISSION_MODE="default"
 ```
 
 ### 3) Run
@@ -86,9 +98,10 @@ Common commands:
 ./run.sh restart
 ```
 
-## Commands
+## Telegram Commands
 
 - `/help`
+- `/provider [codex|claude]`
 - `/sessions [N]`
 - `/use <index|session_id>`
 - `/history [index|session_id] [N]`
@@ -106,8 +119,9 @@ Common commands:
 - `src/tg_codex/telegram/streaming.py`: streaming orchestrator
 - `src/tg_codex/telegram/client.py`: Telegram API wrapper with retries
 - `src/tg_codex/services/codex_runner.py`: async codex subprocess runner
-- `src/tg_codex/services/session_store.py`: session/history reader
-- `src/tg_codex/services/state_store.py`: JSON state persistence
+- `src/tg_codex/services/claude_runner.py`: async claude subprocess runner
+- `src/tg_codex/services/session_store.py`: provider-aware session/history reader
+- `src/tg_codex/services/state_store.py`: provider-aware JSON state persistence
 - `tests/`: pytest suite
 
 ## Testing
@@ -123,8 +137,10 @@ uv run pytest
 
 ## Troubleshooting Slow First Token
 
-If Telegram shows `思考中...` for a long time on simple prompts, the bottleneck is usually the `codex` subprocess network path, not Telegram send latency.
+If Telegram shows `思考中...` for a long time on simple prompts, the bottleneck is usually the model subprocess network path, not Telegram send latency.
 
 - Ensure proxy vars are valid (`TG_PROXY_URL` or `HTTPS_PROXY`).
-- Verify `codex exec --json --skip-git-repo-check "你是谁？"` responds quickly in the same shell.
-- In recent versions, `run.sh` normalizes proxy env names (uppercase/lowercase) to avoid this issue.
+- Verify in the same shell:
+  - `codex exec --json --skip-git-repo-check "who are you?"`
+  - `claude -p --verbose --output-format stream-json "who are you?"`
+- `run.sh` normalizes proxy env names (uppercase/lowercase) to avoid common proxy propagation issues.

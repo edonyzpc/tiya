@@ -1,6 +1,9 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
+
+
+AgentProvider = Literal["codex", "claude"]
 
 
 @dataclass
@@ -13,11 +16,15 @@ class SessionMeta:
 
 
 @dataclass
-class CodexRunResult:
+class AgentRunResult:
     thread_id: Optional[str]
     answer: str
     stderr_text: str
     return_code: int
+
+
+# Backward-compatible alias for existing imports.
+CodexRunResult = AgentRunResult
 
 
 @dataclass
@@ -36,14 +43,19 @@ class AppConfig:
     telegram_token: str
     telegram_proxy: Optional[str]
     allowed_user_ids: Optional[set[int]]
+    default_provider: AgentProvider
     stream_enabled: bool
     stream_edit_interval_ms: int
     stream_min_delta_chars: int
     thinking_status_interval_ms: int
     default_cwd: Path
     state_path: Path
-    session_root: Path
+    codex_session_root: Path
+    claude_session_root: Path
     codex_bin: str
+    claude_bin: str
+    claude_model: Optional[str]
+    claude_permission_mode: str
     dangerous_bypass_level: int
     codex_sandbox_mode: Optional[str]
     codex_approval_policy: Optional[str]

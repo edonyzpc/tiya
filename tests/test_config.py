@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from tg_codex.config import load_config, resolve_tg_proxy, resolve_tg_stream_enabled
+import pytest
+
+from tg_codex.config import load_config, parse_default_provider, resolve_tg_proxy, resolve_tg_stream_enabled
 
 
 def test_resolve_tg_stream_enabled_precedence(monkeypatch):
@@ -36,7 +38,12 @@ def test_load_config_defaults(monkeypatch, tmp_path: Path):
     assert config.thinking_status_interval_ms == 900
     assert config.default_cwd == tmp_path
     assert config.state_path == tmp_path / "state.json"
-    assert config.session_root == tmp_path / "sessions"
+    assert config.default_provider == "codex"
+    assert config.codex_session_root == tmp_path / "sessions"
+    assert config.claude_session_root == Path("~/.claude/projects").expanduser()
+    assert config.claude_bin
+    assert config.claude_model is None
+    assert config.claude_permission_mode == "default"
 
 
 def test_resolve_tg_proxy_precedence(monkeypatch):
@@ -47,3 +54,11 @@ def test_resolve_tg_proxy_precedence(monkeypatch):
     monkeypatch.delenv("TG_PROXY_URL", raising=False)
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy-b:8000")
     assert resolve_tg_proxy() == "http://proxy-b:8000"
+
+
+def test_default_provider_parse():
+    assert parse_default_provider(None) == "codex"
+    assert parse_default_provider("claude") == "claude"
+    assert parse_default_provider(" CoDeX ") == "codex"
+    with pytest.raises(ValueError):
+        parse_default_provider("gpt")

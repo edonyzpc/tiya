@@ -5,8 +5,8 @@ from types import SimpleNamespace
 import pytest
 from aiogram import Bot, Dispatcher
 
-from tg_codex.domain.models import CodexRunResult
-from tg_codex.services.session_store import SessionStore
+from tg_codex.domain.models import AgentRunResult
+from tg_codex.services.session_store import ClaudeSessionStore, CodexSessionStore
 from tg_codex.services.state_store import StateStore
 from tg_codex.telegram.router import TgCodexService, build_router
 
@@ -68,7 +68,7 @@ class FakeTelegramClient:
     async def send_chat_action(self, chat_id, action="typing", message_thread_id=None):
         return True
 
-    async def set_my_commands(self, commands):
+    async def set_my_commands(self, commands, language_code=None):
         return True
 
     async def set_chat_menu_button_commands(self):
@@ -85,12 +85,13 @@ class FakeTelegramClient:
         return True
 
 
-class FakeCodexRunner:
-    def __init__(self):
+class FakeRunner:
+    def __init__(self, name: str):
+        self.name = name
         self.calls = []
-        self.next_result = CodexRunResult(
-            thread_id="thread-100",
-            answer="ok-answer",
+        self.next_result = AgentRunResult(
+            thread_id=f"{name}-thread-1",
+            answer=f"{name}-ok-answer",
             stderr_text="",
             return_code=0,
         )
@@ -116,11 +117,11 @@ def bot():
 
 
 @pytest.fixture
-def session_root(tmp_path: Path) -> Path:
-    root = tmp_path / "sessions"
-    root.mkdir(parents=True)
-    path = root / "s1.jsonl"
-    with path.open("w", encoding="utf-8") as f:
+def session_roots(tmp_path: Path) -> tuple[Path, Path]:
+    codex_root = tmp_path / "codex-sessions"
+    codex_root.mkdir(parents=True)
+    codex_path = codex_root / "s1.jsonl"
+    with codex_path.open("w", encoding="utf-8") as f:
         f.write(
             json.dumps(
                 {
@@ -141,107 +142,159 @@ def session_root(tmp_path: Path) -> Path:
                     "type": "event_msg",
                     "payload": {
                         "type": "user_message",
-                        "message": "session title",
+                        "message": "codex title",
                     },
                 },
                 ensure_ascii=False,
             )
             + "\n"
         )
-    return root
+
+    claude_root = tmp_path / "claude-projects"
+    claude_project = claude_root / "-mnt-code-tiya"
+    claude_project.mkdir(parents=True)
+    claude_id = "925ffdad-54ba-41ed-8e3b-a7e72843079c"
+    claude_path = claude_project / f"{claude_id}.jsonl"
+    with claude_path.open("w", encoding="utf-8") as f:
+        f.write(
+            json.dumps(
+                {
+                    "type": "user",
+                    "sessionId": claude_id,
+                    "cwd": str(tmp_path),
+                    "timestamp": "2026-03-05T00:00:00Z",
+                    "message": {"role": "user", "content": "claude title"},
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+        f.write(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "sessionId": claude_id,
+                    "cwd": str(tmp_path),
+                    "timestamp": "2026-03-05T00:00:01Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "claude answer"}],
+                    },
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+
+    return codex_root, claude_root
+
+
+def _build_service(
+    tmp_path: Path,
+    session_roots: tuple[Path, Path],
+    allowed_user_ids=None,
+):
+    api = FakeTelegramClient()
+    codex_runner = FakeRunner("codex")
+    claude_runner = FakeRunner("claude")
+    state = StateStore(tmp_path / "state.json", default_provider="codex")
+    codex_root, claude_root = session_roots
+
+    service = TgCodexService(
+        api=api,
+        session_stores={
+            "codex": CodexSessionStore(codex_root),
+            "claude": ClaudeSessionStore(claude_root),
+        },
+        state=state,
+        runners={
+            "codex": codex_runner,
+            "claude": claude_runner,
+        },
+        runner_bins={
+            "codex": "codex",
+            "claude": "claude",
+        },
+        default_cwd=tmp_path,
+        allowed_user_ids=allowed_user_ids,
+        stream_enabled=False,
+        stream_edit_interval_ms=700,
+        stream_min_delta_chars=8,
+        thinking_status_interval_ms=900,
+    )
+    return service, api, state, codex_runner, claude_runner
 
 
 async def _feed(dp: Dispatcher, bot: Bot, update: dict):
     await dp.feed_raw_update(bot, update)
 
 
-@pytest.mark.asyncio
-async def test_help_command_via_feed_update(bot: Bot, tmp_path: Path, session_root: Path):
-    api = FakeTelegramClient()
-    codex = FakeCodexRunner()
-    service = TgCodexService(
-        api=api,
-        sessions=SessionStore(session_root),
-        state=StateStore(tmp_path / "state.json"),
-        codex=codex,
-        default_cwd=tmp_path,
-        allowed_user_ids=None,
-        stream_enabled=False,
-        stream_edit_interval_ms=700,
-        stream_min_delta_chars=8,
-        thinking_status_interval_ms=900,
-    )
+def _message_update(update_id: int, text: str, user_id: int = 1, message_id: int = 11) -> dict:
+    return {
+        "update_id": update_id,
+        "message": {
+            "message_id": message_id,
+            "date": 1,
+            "chat": {"id": 101, "type": "private"},
+            "from": {"id": user_id, "is_bot": False, "first_name": "u"},
+            "text": text,
+        },
+    }
 
+
+@pytest.mark.asyncio
+async def test_help_command_via_feed_update(bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]):
+    service, api, _, _, _ = _build_service(tmp_path, session_roots)
     dp = Dispatcher()
     dp.include_router(build_router(service))
 
-    await _feed(
-        dp,
-        bot,
-        {
-            "update_id": 1,
-            "message": {
-                "message_id": 11,
-                "date": 1,
-                "chat": {"id": 101, "type": "private"},
-                "from": {"id": 1, "is_bot": False, "first_name": "u"},
-                "text": "/help",
-            },
-        },
-    )
+    await _feed(dp, bot, _message_update(1, "/help"))
 
     assert api.send_message_calls
     assert "可用命令" in api.send_message_calls[-1]["text"]
+    assert "/provider" in api.send_message_calls[-1]["text"]
 
 
 @pytest.mark.asyncio
-async def test_sessions_and_callback_switch(bot: Bot, tmp_path: Path, session_root: Path):
-    api = FakeTelegramClient()
-    codex = FakeCodexRunner()
-    state = StateStore(tmp_path / "state.json")
-    service = TgCodexService(
-        api=api,
-        sessions=SessionStore(session_root),
-        state=state,
-        codex=codex,
-        default_cwd=tmp_path,
-        allowed_user_ids={1},
-        stream_enabled=False,
-        stream_edit_interval_ms=700,
-        stream_min_delta_chars=8,
-        thinking_status_interval_ms=900,
-    )
-
+async def test_provider_switch_and_runner_dispatch(bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]):
+    service, _, state, codex_runner, claude_runner = _build_service(tmp_path, session_roots)
     dp = Dispatcher()
     dp.include_router(build_router(service))
+
+    await _feed(dp, bot, _message_update(1, "/provider claude"))
+    assert state.get_active_provider(1) == "claude"
+
+    await _feed(dp, bot, _message_update(2, "hello from claude", message_id=12))
+    assert len(claude_runner.calls) == 1
+    assert len(codex_runner.calls) == 0
+
+    await _feed(dp, bot, _message_update(3, "/provider codex", message_id=13))
+    await _feed(dp, bot, _message_update(4, "hello from codex", message_id=14))
+    assert len(codex_runner.calls) == 1
+    assert state.get_active_provider(1) == "codex"
+
+
+@pytest.mark.asyncio
+async def test_sessions_and_callback_switch_are_provider_aware(
+    bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]
+):
+    service, api, state, _, _ = _build_service(tmp_path, session_roots, allowed_user_ids={1})
+    dp = Dispatcher()
+    dp.include_router(build_router(service))
+
+    await _feed(dp, bot, _message_update(1, "/sessions 1"))
+    assert state.get_last_session_ids(1, provider="codex") == ["session-1"]
 
     await _feed(
         dp,
         bot,
         {
             "update_id": 2,
-            "message": {
-                "message_id": 12,
-                "date": 1,
-                "chat": {"id": 101, "type": "private"},
-                "from": {"id": 1, "is_bot": False, "first_name": "u"},
-                "text": "/sessions 1",
-            },
-        },
-    )
-
-    assert state.get_last_session_ids(1) == ["session-1"]
-
-    await _feed(
-        dp,
-        bot,
-        {
-            "update_id": 3,
             "callback_query": {
                 "id": "cq-1",
                 "from": {"id": 1, "is_bot": False, "first_name": "u"},
                 "chat_instance": "ci",
-                "data": "use:session-1",
+                "data": "use:codex:session-1",
                 "message": {
                     "message_id": 13,
                     "date": 1,
@@ -251,119 +304,41 @@ async def test_sessions_and_callback_switch(bot: Bot, tmp_path: Path, session_ro
             },
         },
     )
-
-    active_id, _ = state.get_active(1)
-    assert active_id == "session-1"
+    assert state.get_active(1, provider="codex")[0] == "session-1"
     assert api.answer_callback_query_calls
 
+    await _feed(dp, bot, _message_update(3, "/provider claude", message_id=14))
+    await _feed(dp, bot, _message_update(4, "/sessions 1", message_id=15))
+    claude_ids = state.get_last_session_ids(1, provider="claude")
+    assert len(claude_ids) == 1
+    assert claude_ids[0] == "925ffdad-54ba-41ed-8e3b-a7e72843079c"
+
 
 @pytest.mark.asyncio
-async def test_allowlist_block(bot: Bot, tmp_path: Path, session_root: Path):
-    api = FakeTelegramClient()
-    codex = FakeCodexRunner()
-    service = TgCodexService(
-        api=api,
-        sessions=SessionStore(session_root),
-        state=StateStore(tmp_path / "state.json"),
-        codex=codex,
-        default_cwd=tmp_path,
-        allowed_user_ids={1},
-        stream_enabled=False,
-        stream_edit_interval_ms=700,
-        stream_min_delta_chars=8,
-        thinking_status_interval_ms=900,
-    )
-
+async def test_continue_and_new_session_paths(bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]):
+    service, _, state, codex_runner, _ = _build_service(tmp_path, session_roots)
+    state.set_active_session(1, "existing-session", str(tmp_path), provider="codex")
     dp = Dispatcher()
     dp.include_router(build_router(service))
 
-    await _feed(
-        dp,
-        bot,
-        {
-            "update_id": 4,
-            "message": {
-                "message_id": 14,
-                "date": 1,
-                "chat": {"id": 101, "type": "private"},
-                "from": {"id": 2, "is_bot": False, "first_name": "blocked"},
-                "text": "hello",
-            },
-        },
-    )
+    await _feed(dp, bot, _message_update(1, "continue prompt", message_id=21))
+    assert codex_runner.calls[-1]["session_id"] == "existing-session"
 
+    await _feed(dp, bot, _message_update(2, "/new", message_id=22))
+    await _feed(dp, bot, _message_update(3, "new prompt", message_id=23))
+    assert codex_runner.calls[-1]["session_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_allowlist_block_applies_to_provider_commands(
+    bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]
+):
+    service, api, _, codex_runner, claude_runner = _build_service(tmp_path, session_roots, allowed_user_ids={1})
+    dp = Dispatcher()
+    dp.include_router(build_router(service))
+
+    await _feed(dp, bot, _message_update(1, "/provider claude", user_id=2))
     assert api.send_message_calls
     assert "没有权限" in api.send_message_calls[-1]["text"]
-    assert codex.calls == []
-
-
-@pytest.mark.asyncio
-async def test_continue_and_new_session_paths(bot: Bot, tmp_path: Path, session_root: Path):
-    api = FakeTelegramClient()
-    codex = FakeCodexRunner()
-    state = StateStore(tmp_path / "state.json")
-    state.set_active_session(1, "existing-session", str(tmp_path))
-
-    service = TgCodexService(
-        api=api,
-        sessions=SessionStore(session_root),
-        state=state,
-        codex=codex,
-        default_cwd=tmp_path,
-        allowed_user_ids=None,
-        stream_enabled=False,
-        stream_edit_interval_ms=700,
-        stream_min_delta_chars=8,
-        thinking_status_interval_ms=900,
-    )
-
-    dp = Dispatcher()
-    dp.include_router(build_router(service))
-
-    await _feed(
-        dp,
-        bot,
-        {
-            "update_id": 5,
-            "message": {
-                "message_id": 15,
-                "date": 1,
-                "chat": {"id": 101, "type": "private"},
-                "from": {"id": 1, "is_bot": False, "first_name": "u"},
-                "text": "continue prompt",
-            },
-        },
-    )
-    assert codex.calls[-1]["session_id"] == "existing-session"
-
-    await _feed(
-        dp,
-        bot,
-        {
-            "update_id": 6,
-            "message": {
-                "message_id": 16,
-                "date": 1,
-                "chat": {"id": 101, "type": "private"},
-                "from": {"id": 1, "is_bot": False, "first_name": "u"},
-                "text": "/new",
-            },
-        },
-    )
-
-    await _feed(
-        dp,
-        bot,
-        {
-            "update_id": 7,
-            "message": {
-                "message_id": 17,
-                "date": 1,
-                "chat": {"id": 101, "type": "private"},
-                "from": {"id": 1, "is_bot": False, "first_name": "u"},
-                "text": "new prompt",
-            },
-        },
-    )
-
-    assert codex.calls[-1]["session_id"] is None
+    assert codex_runner.calls == []
+    assert claude_runner.calls == []

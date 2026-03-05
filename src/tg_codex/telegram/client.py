@@ -173,11 +173,18 @@ class TelegramClient:
 
         return bool(await self._call_with_retries("sendChatAction", _call))
 
-    async def set_my_commands(self, commands: list[dict[str, str]]) -> bool:
+    async def set_my_commands(
+        self,
+        commands: list[dict[str, str]],
+        language_code: Optional[str] = None,
+    ) -> bool:
         telegram_commands = [BotCommand(command=item["command"], description=item["description"]) for item in commands]
 
         async def _call() -> bool:
-            return await self.bot.set_my_commands(telegram_commands)
+            return await self.bot.set_my_commands(
+                telegram_commands,
+                language_code=language_code,
+            )
 
         return bool(await self._call_with_retries("setMyCommands", _call))
 

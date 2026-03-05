@@ -1,9 +1,9 @@
 import os
 import shutil
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 
-from .domain.models import AppConfig
+from .domain.models import AgentProvider, AppConfig
 
 
 def env(name: str, default: Optional[str] = None) -> Optional[str]:
@@ -44,6 +44,13 @@ def parse_dangerous_bypass_level(raw: Optional[str]) -> int:
     return level
 
 
+def parse_default_provider(raw: Optional[str]) -> AgentProvider:
+    value = (raw or "codex").strip().lower()
+    if value not in ("codex", "claude"):
+        raise ValueError("DEFAULT_PROVIDER must be codex or claude")
+    return cast(AgentProvider, value)
+
+
 def parse_non_negative_int(raw: Optional[str], default: int) -> int:
     if raw is None:
         return default
@@ -76,6 +83,18 @@ def resolve_codex_bin(configured: Optional[str]) -> str:
     return "codex"
 
 
+def resolve_claude_bin(configured: Optional[str]) -> str:
+    if configured:
+        return configured
+    found = shutil.which("claude")
+    if found:
+        return found
+    default_path = Path("~/.local/bin/claude").expanduser()
+    if default_path.exists():
+        return str(default_path)
+    return "claude"
+
+
 def resolve_tg_proxy() -> Optional[str]:
     explicit = env("TG_PROXY_URL")
     if explicit:
@@ -96,14 +115,19 @@ def load_config() -> AppConfig:
         telegram_token=token,
         telegram_proxy=resolve_tg_proxy(),
         allowed_user_ids=parse_allowed_user_ids(env("ALLOWED_TELEGRAM_USER_IDS")),
+        default_provider=parse_default_provider(env("DEFAULT_PROVIDER", "codex")),
         stream_enabled=resolve_tg_stream_enabled(),
         stream_edit_interval_ms=parse_non_negative_int(env("TG_STREAM_EDIT_INTERVAL_MS", "700"), 700),
         stream_min_delta_chars=parse_non_negative_int(env("TG_STREAM_MIN_DELTA_CHARS", "8"), 8),
         thinking_status_interval_ms=parse_non_negative_int(env("TG_THINKING_STATUS_INTERVAL_MS", "900"), 900),
         default_cwd=Path(env("DEFAULT_CWD", os.getcwd())).expanduser(),
         state_path=Path(env("STATE_PATH", "./bot_state.json")),
-        session_root=Path(env("CODEX_SESSION_ROOT", "~/.codex/sessions")).expanduser(),
+        codex_session_root=Path(env("CODEX_SESSION_ROOT", "~/.codex/sessions")).expanduser(),
+        claude_session_root=Path(env("CLAUDE_SESSION_ROOT", "~/.claude/projects")).expanduser(),
         codex_bin=resolve_codex_bin(env("CODEX_BIN")),
+        claude_bin=resolve_claude_bin(env("CLAUDE_BIN")),
+        claude_model=env("CLAUDE_MODEL"),
+        claude_permission_mode=env("CLAUDE_PERMISSION_MODE", "default") or "default",
         dangerous_bypass_level=parse_dangerous_bypass_level(env("CODEX_DANGEROUS_BYPASS", "0")),
         codex_sandbox_mode=env("CODEX_SANDBOX_MODE"),
         codex_approval_policy=env("CODEX_APPROVAL_POLICY"),
