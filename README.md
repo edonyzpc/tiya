@@ -2,41 +2,76 @@
 
 Language: English | [简体中文](README.zh-CN.md)
 
-`tg-codex` lets you run and continue local `codex` sessions from Telegram.
+`tg-codex` lets you continue local `codex` sessions from Telegram.
 
-## Features
+## Highlights
 
-- List local session history with titles
-- Switch to an existing session and continue asking
-- Create new sessions and control working directory
-- View recent messages in a session (`/history`)
-- Run Telegram bot to control Codex CLI remotely
+- Built on `aiogram` (async)
+- Polling mode only (no webhook)
+- Session list/switch/history for local Codex sessions
+- Private-chat streaming with fallback chain:
+  - `sendMessageDraft`
+  - `editMessageText`
+  - `typing + final sendMessage`
+- `uv`-managed project (`pyproject.toml + uv.lock`)
 
 ## Requirements
 
-- Python 3.9+
-- Local `codex` installed and already logged in
-- Telegram: `TELEGRAM_BOT_TOKEN`
+- Python 3.10+
+- `uv`
+- Local `codex` CLI already installed/logged in
+- Telegram bot token
 
 ## Quick Start
 
-### 1) Configure environment variables
+### 1) Install dependencies
 
 ```bash
-# Telegram (required)
+uv sync --group dev
+```
+
+### 2) Configure environment
+
+`run.sh` auto-loads `.env` from project root. You can either export vars in shell or put them in `.env`.
+
+Example `.env`:
+
+```bash
+TELEGRAM_BOT_TOKEN="your bot token"
+ALLOWED_TELEGRAM_USER_IDS="123456789"
+DEFAULT_CWD="/path/to/your/project"
+CODEX_BIN="codex"
+TG_STREAM_ENABLED=1
+```
+
+Environment variables:
+
+```bash
 export TELEGRAM_BOT_TOKEN="your bot token"
 export ALLOWED_TELEGRAM_USER_IDS="123456789"         # optional, recommended
 
-# Shared (optional)
+# Streaming
+export TG_STREAM_ENABLED=1
+export TG_STREAM_EDIT_INTERVAL_MS=700
+export TG_STREAM_MIN_DELTA_CHARS=8
+export TG_THINKING_STATUS_INTERVAL_MS=900
+
+# HTTP retry
+export TG_HTTP_MAX_RETRIES=2
+export TG_HTTP_RETRY_BASE_MS=300
+export TG_HTTP_RETRY_MAX_MS=3000
+export TG_PROXY_URL="http://127.0.0.1:7897"         # optional; falls back to HTTPS_PROXY/http_proxy
+
+# Codex
 export DEFAULT_CWD="/path/to/your/project"
-export CODEX_BIN="/Applications/Codex.app/Contents/Resources/codex"
+export CODEX_BIN="codex"
 export CODEX_SESSION_ROOT="$HOME/.codex/sessions"
-export CODEX_SANDBOX_MODE=""                         # optional: used only when CODEX_DANGEROUS_BYPASS=1
-export CODEX_APPROVAL_POLICY=""                      # optional: used only when CODEX_DANGEROUS_BYPASS=1
-export CODEX_DANGEROUS_BYPASS=0                      # 0/1/2 (see permission section below)
+export CODEX_SANDBOX_MODE=""
+export CODEX_APPROVAL_POLICY=""
+export CODEX_DANGEROUS_BYPASS=0
 ```
 
-### 2) Start services
+### 3) Run
 
 ```bash
 ./run.sh start
@@ -51,52 +86,45 @@ Common commands:
 ./run.sh restart
 ```
 
-## Setup Guide
-
-See [SETUP_TELEGRAM.md](SETUP_TELEGRAM.md) for detailed step-by-step setup instructions.
-
-## Permission Switches & Risks
-
-Permission behavior is controlled by `CODEX_DANGEROUS_BYPASS`:
-
-- `0` (default): no extra permission flags (least privilege)
-- `1`: enable permission flags
-  - `CODEX_SANDBOX_MODE` defaults to `danger-full-access` (override allowed)
-  - `CODEX_APPROVAL_POLICY` defaults to `never` (override allowed)
-- `2`: append `--dangerously-bypass-approvals-and-sandbox`
-
-Notes:
-- `CODEX_SANDBOX_MODE` / `CODEX_APPROVAL_POLICY` are applied only when `CODEX_DANGEROUS_BYPASS=1`
-- `CODEX_DANGEROUS_BYPASS=2` takes full bypass path
-
-Risk notes:
-
-- It may execute arbitrary commands and modify/delete local files
-- It may read and exfiltrate sensitive data (keys, configs, source code)
-- Enable only in controlled environments and switch back to `0` afterward
-
 ## Commands
 
 - `/help`
-- `/sessions [N]`: list recent `N` sessions (title + index)
-- `/use <index|session_id>`: switch active session
-- `/history [index|session_id] [N]`: show latest `N` messages (default 10, max 50)
-- `/new [cwd]`: enter new-session mode; next normal message creates a new session
-- `/status`: show current active session
-- `/ask <text>`: ask in the current session
-- Send normal text directly: continue current session, or create one if in new-session mode
+- `/sessions [N]`
+- `/use <index|session_id>`
+- `/history [index|session_id] [N]`
+- `/new [cwd]`
+- `/status`
+- `/ask <text>`
+- Send normal text directly to continue chat
 
-Tips:
+## Project Structure
 
-- After `/sessions`, send an index directly (for example `1`) to switch
+- `tg_codex_bot.py`: thin compatibility entry
+- `src/tg_codex/app.py`: app composition & polling startup
+- `src/tg_codex/config.py`: env parsing
+- `src/tg_codex/telegram/router.py`: command/callback routing
+- `src/tg_codex/telegram/streaming.py`: streaming orchestrator
+- `src/tg_codex/telegram/client.py`: Telegram API wrapper with retries
+- `src/tg_codex/services/codex_runner.py`: async codex subprocess runner
+- `src/tg_codex/services/session_store.py`: session/history reader
+- `src/tg_codex/services/state_store.py`: JSON state persistence
+- `tests/`: pytest suite
 
-## Additional Scripts
+## Testing
 
-- `tg_codex_bot.py`: Telegram service entry
-- `run.sh`: Process management script
+```bash
+uv run pytest
+```
 
-## Known Limitations
+## Notes
 
-- New sessions are mainly visible in terminal/CLI session history
-- Codex Desktop may need restart before newly continued sessions become visible
-- Replies are returned after each request finishes (no streaming push yet)
+- Legacy env `TELEGRAM_ENABLE_DRAFT_STREAM` is still honored when `TG_STREAM_ENABLED` is unset.
+- Polling mode only by design in current architecture.
+
+## Troubleshooting Slow First Token
+
+If Telegram shows `思考中...` for a long time on simple prompts, the bottleneck is usually the `codex` subprocess network path, not Telegram send latency.
+
+- Ensure proxy vars are valid (`TG_PROXY_URL` or `HTTPS_PROXY`).
+- Verify `codex exec --json --skip-git-repo-check "你是谁？"` responds quickly in the same shell.
+- In recent versions, `run.sh` normalizes proxy env names (uppercase/lowercase) to avoid this issue.
