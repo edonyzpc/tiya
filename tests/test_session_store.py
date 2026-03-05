@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from tg_codex.services.session_store import ClaudeSessionStore, CodexSessionStore
+from services.session_store import ClaudeSessionStore, CodexSessionStore
 
 
 def _write_codex_session(path: Path, session_id: str, cwd: str, user_text: str, assistant_text: str) -> None:

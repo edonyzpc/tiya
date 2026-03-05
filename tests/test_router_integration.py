@@ -5,10 +5,10 @@ from types import SimpleNamespace
 import pytest
 from aiogram import Bot, Dispatcher
 
-from tg_codex.domain.models import AgentRunResult
-from tg_codex.services.session_store import ClaudeSessionStore, CodexSessionStore
-from tg_codex.services.state_store import StateStore
-from tg_codex.telegram.router import TgCodexService, build_router
+from domain.models import AgentRunResult
+from services.session_store import ClaudeSessionStore, CodexSessionStore
+from services.state_store import StateStore
+from telegram.router import TgCodexService, build_router
 
 
 class FakeTelegramClient:

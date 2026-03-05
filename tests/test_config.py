@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from tg_codex.config import load_config, parse_default_provider, resolve_tg_proxy, resolve_tg_stream_enabled
+from config import load_config, parse_default_provider, resolve_tg_proxy, resolve_tg_stream_enabled
 
 
 def test_resolve_tg_stream_enabled_precedence(monkeypatch):

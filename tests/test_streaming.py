@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tg_codex.telegram.streaming import StreamOrchestrator
+from telegram.streaming import StreamOrchestrator
 
 
 class FakeTelegramClient:

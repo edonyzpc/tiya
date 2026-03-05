@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from tg_codex.services.codex_runner import CodexRunner
+from services.codex_runner import CodexRunner
 
 
 class _FakeStream:
@@ -43,7 +43,7 @@ async def test_run_prompt_stream_extracts_thread_and_partial(monkeypatch, tmp_pa
     async def _fake_create(*args, **kwargs):
         return proc
 
-    monkeypatch.setattr("tg_codex.services.codex_runner.asyncio.create_subprocess_exec", _fake_create)
+    monkeypatch.setattr("services.codex_runner.asyncio.create_subprocess_exec", _fake_create)
 
     partials: list[str] = []
 
@@ -75,7 +75,7 @@ async def test_run_prompt_emits_reasoning_summary(monkeypatch, tmp_path: Path):
     async def _fake_create(*args, **kwargs):
         return proc
 
-    monkeypatch.setattr("tg_codex.services.codex_runner.asyncio.create_subprocess_exec", _fake_create)
+    monkeypatch.setattr("services.codex_runner.asyncio.create_subprocess_exec", _fake_create)
 
     reasoning_updates: list[str] = []
 
@@ -101,7 +101,7 @@ async def test_run_prompt_non_zero_exit_uses_merged_output(monkeypatch, tmp_path
     async def _fake_create(*args, **kwargs):
         return proc
 
-    monkeypatch.setattr("tg_codex.services.codex_runner.asyncio.create_subprocess_exec", _fake_create)
+    monkeypatch.setattr("services.codex_runner.asyncio.create_subprocess_exec", _fake_create)
 
     runner = CodexRunner(codex_bin="codex")
     result = await runner.run_prompt("hi", tmp_path)
@@ -116,7 +116,7 @@ async def test_run_prompt_handles_missing_binary(monkeypatch, tmp_path: Path):
     async def _fake_create(*args, **kwargs):
         raise FileNotFoundError("not found")
 
-    monkeypatch.setattr("tg_codex.services.codex_runner.asyncio.create_subprocess_exec", _fake_create)
+    monkeypatch.setattr("services.codex_runner.asyncio.create_subprocess_exec", _fake_create)
 
     runner = CodexRunner(codex_bin="/missing/codex")
     result = await runner.run_prompt("hi", tmp_path)
@@ -130,7 +130,7 @@ async def test_run_prompt_handles_missing_cwd(monkeypatch, tmp_path: Path):
     async def _fake_create(*args, **kwargs):
         raise FileNotFoundError(2, "No such file or directory", "tiya")
 
-    monkeypatch.setattr("tg_codex.services.codex_runner.asyncio.create_subprocess_exec", _fake_create)
+    monkeypatch.setattr("services.codex_runner.asyncio.create_subprocess_exec", _fake_create)
 
     runner = CodexRunner(codex_bin="codex")
     result = await runner.run_prompt("hi", tmp_path / "missing-cwd")

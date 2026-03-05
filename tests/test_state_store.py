@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from tg_codex.services.state_store import StateStore
+from services.state_store import StateStore
 
 
 def test_state_store_provider_roundtrip(tmp_path: Path):
