@@ -1,0 +1,29 @@
+[project]
+name = "tg-codex"
+version = "0.1.0"
+description = "Run and continue local Codex sessions from Telegram"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = [
+  "aiogram>=3.26.0,<4.0.0",
+  "aiohttp-socks>=0.10.1,<0.11.0",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.4.0",
+  "pytest-asyncio>=1.2.0",
+]
+
+[build-system]
+requires = ["hatchling>=1.26.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tg_codex"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+addopts = "-q"

@@ -1,0 +1,90 @@
+import asyncio
+
+from aiogram import Bot, Dispatcher
+from aiogram.client.session.aiohttp import AiohttpSession
+
+from tg_codex.config import load_config
+from tg_codex.logging_utils import log
+from tg_codex.services.codex_runner import CodexRunner
+from tg_codex.services.session_store import SessionStore
+from tg_codex.services.state_store import StateStore
+from tg_codex.telegram.client import TelegramClient
+from tg_codex.telegram.router import TgCodexService, build_router
+
+
+async def run() -> None:
+    config = load_config()
+
+    if config.dangerous_bypass_level == 1:
+        log("[warn] CODEX_DANGEROUS_BYPASS=1, enabling sandbox_mode=danger-full-access and approval_policy=never")
+    elif config.dangerous_bypass_level >= 2:
+        log("[warn] CODEX_DANGEROUS_BYPASS=2, approvals and sandbox are fully bypassed")
+
+    if config.stream_enabled:
+        log(
+            "[info] TG streaming enabled "
+            f"(edit interval: {config.stream_edit_interval_ms}ms, "
+            f"min delta: {config.stream_min_delta_chars}, "
+            f"thinking interval: {config.thinking_status_interval_ms}ms)"
+        )
+    else:
+        log("[info] TG streaming disabled")
+
+    log(
+        "[info] TG http retry "
+        f"(max_retries={config.tg_http_max_retries}, "
+        f"base_ms={config.tg_http_retry_base_ms}, "
+        f"max_ms={config.tg_http_retry_max_ms})"
+    )
+
+    bot_session = AiohttpSession(proxy=config.telegram_proxy) if config.telegram_proxy else None
+    if config.telegram_proxy:
+        log("[info] TG proxy enabled")
+    bot = Bot(token=config.telegram_token, session=bot_session) if bot_session else Bot(token=config.telegram_token)
+    api = TelegramClient(
+        bot=bot,
+        request_max_retries=config.tg_http_max_retries,
+        request_retry_base_ms=config.tg_http_retry_base_ms,
+        request_retry_max_ms=config.tg_http_retry_max_ms,
+    )
+
+    sessions = SessionStore(config.session_root)
+    state = StateStore(config.state_path)
+    codex = CodexRunner(
+        codex_bin=config.codex_bin,
+        sandbox_mode=config.codex_sandbox_mode,
+        approval_policy=config.codex_approval_policy,
+        dangerous_bypass_level=config.dangerous_bypass_level,
+    )
+
+    service = TgCodexService(
+        api=api,
+        sessions=sessions,
+        state=state,
+        codex=codex,
+        default_cwd=config.default_cwd,
+        allowed_user_ids=config.allowed_user_ids,
+        stream_enabled=config.stream_enabled,
+        stream_edit_interval_ms=config.stream_edit_interval_ms,
+        stream_min_delta_chars=config.stream_min_delta_chars,
+        thinking_status_interval_ms=config.thinking_status_interval_ms,
+    )
+
+    dispatcher = Dispatcher()
+    dispatcher.include_router(build_router(service))
+
+    try:
+        await service.setup_bot_menu()
+        log("bot command menu configured")
+    except Exception as exc:
+        log(f"bot command menu setup failed: {exc}")
+
+    log("tg-codex service started")
+    try:
+        await dispatcher.start_polling(bot)
+    finally:
+        await bot.session.close()
+
+
+def main() -> None:
+    asyncio.run(run())
