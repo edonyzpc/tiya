@@ -33,7 +33,7 @@ uv sync --group dev
 
 ### 2) Configure environment
 
-`run.sh` auto-loads `.env` from project root. You can either export vars in shell or put them in `.env`.
+`uv run start|stop|restart|status|logs` auto-loads `.env` from project root. You can either export vars in shell or put them in `.env`.
 
 Example `.env`:
 
@@ -66,7 +66,12 @@ export TG_THINKING_STATUS_INTERVAL_MS=900
 export TG_HTTP_MAX_RETRIES=2
 export TG_HTTP_RETRY_BASE_MS=300
 export TG_HTTP_RETRY_MAX_MS=3000
-export TG_PROXY_URL="http://127.0.0.1:7897"         # optional; falls back to HTTPS_PROXY/http_proxy
+
+# Optional proxy (use when VPN / network policy requires it)
+export TG_PROXY_URL="http://127.0.0.1:7897"
+# or:
+export HTTPS_PROXY="http://127.0.0.1:7897"
+export HTTP_PROXY="http://127.0.0.1:7897"
 
 # Codex
 export DEFAULT_CWD="/path/to/your/project"
@@ -86,16 +91,16 @@ export CLAUDE_PERMISSION_MODE="default"
 ### 3) Run
 
 ```bash
-./run.sh start
+uv run start
 ```
 
 Common commands:
 
 ```bash
-./run.sh stop
-./run.sh status
-./run.sh logs
-./run.sh restart
+uv run stop
+uv run status
+uv run logs
+uv run restart
 ```
 
 ## Telegram Commands
@@ -112,16 +117,17 @@ Common commands:
 
 ## Project Structure
 
-- `tg_codex_bot.py`: thin compatibility entry
-- `src/tg_codex/app.py`: app composition & polling startup
-- `src/tg_codex/config.py`: env parsing
-- `src/tg_codex/telegram/router.py`: command/callback routing
-- `src/tg_codex/telegram/streaming.py`: streaming orchestrator
-- `src/tg_codex/telegram/client.py`: Telegram API wrapper with retries
-- `src/tg_codex/services/codex_runner.py`: async codex subprocess runner
-- `src/tg_codex/services/claude_runner.py`: async claude subprocess runner
-- `src/tg_codex/services/session_store.py`: provider-aware session/history reader
-- `src/tg_codex/services/state_store.py`: provider-aware JSON state persistence
+- `tiya.py`: startup entry
+- `src/cli.py`: service manager (`start|stop|restart|status|logs`)
+- `src/app.py`: app composition & polling startup
+- `src/config.py`: env parsing
+- `src/telegram/router.py`: command/callback routing
+- `src/telegram/streaming.py`: streaming orchestrator
+- `src/telegram/client.py`: Telegram API wrapper with retries
+- `src/services/codex_runner.py`: async codex subprocess runner
+- `src/services/claude_runner.py`: async claude subprocess runner
+- `src/services/session_store.py`: provider-aware session/history reader
+- `src/services/state_store.py`: provider-aware JSON state persistence
 - `tests/`: pytest suite
 
 ## Testing
@@ -134,13 +140,14 @@ uv run pytest
 
 - Legacy env `TELEGRAM_ENABLE_DRAFT_STREAM` is still honored when `TG_STREAM_ENABLED` is unset.
 - Polling mode only by design in current architecture.
+- `run.sh` has been removed. Use `uv run <command>` only.
 
 ## Troubleshooting Slow First Token
 
 If Telegram shows `思考中...` for a long time on simple prompts, the bottleneck is usually the model subprocess network path, not Telegram send latency.
 
-- Ensure proxy vars are valid (`TG_PROXY_URL` or `HTTPS_PROXY`).
+- Ensure optional proxy vars are valid when VPN is enabled (`TG_PROXY_URL` or `HTTPS_PROXY`).
 - Verify in the same shell:
   - `codex exec --json --skip-git-repo-check "who are you?"`
   - `claude -p --verbose --output-format stream-json "who are you?"`
-- `run.sh` normalizes proxy env names (uppercase/lowercase) to avoid common proxy propagation issues.
+- `uv run start` normalizes proxy env names (uppercase/lowercase) to avoid common proxy propagation issues.

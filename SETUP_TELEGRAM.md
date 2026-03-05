@@ -17,7 +17,7 @@ uv sync --group dev
 
 ## 2) Configure env vars
 
-`run.sh` automatically loads `.env` from the project root on startup.
+`uv run start|stop|restart|status|logs` automatically loads `.env` from the project root on startup.
 
 ```bash
 export TELEGRAM_BOT_TOKEN="123456:xxxx"
@@ -42,20 +42,25 @@ export TG_THINKING_STATUS_INTERVAL_MS=900
 export TG_HTTP_MAX_RETRIES=2
 export TG_HTTP_RETRY_BASE_MS=300
 export TG_HTTP_RETRY_MAX_MS=3000
-export TG_PROXY_URL="http://127.0.0.1:7897"   # optional, or rely on HTTPS_PROXY/http_proxy
+
+# Optional proxy (only if VPN / network policy needs it)
+export TG_PROXY_URL="http://127.0.0.1:7897"
+# or:
+export HTTPS_PROXY="http://127.0.0.1:7897"
+export HTTP_PROXY="http://127.0.0.1:7897"
 ```
 
 ## 3) Start service
 
 ```bash
-./run.sh start
+uv run start
 ```
 
 ## 4) Verify
 
 ```bash
-./run.sh status
-./run.sh logs
+uv run status
+uv run logs
 ```
 
 If logs show `tiya service started`, the bot is running.
@@ -73,11 +78,12 @@ Use:
 ## 6) Stop / restart
 
 ```bash
-./run.sh stop
-./run.sh restart
+uv run stop
+uv run restart
 ```
 
 ## Notes
 
 - Polling mode only.
 - Legacy variable `TELEGRAM_ENABLE_DRAFT_STREAM` is still supported as fallback.
+- `run.sh` has been removed. Use `uv run <command>`.

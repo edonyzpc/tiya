@@ -33,7 +33,7 @@ uv sync --group dev
 
 ### 2) 配置环境变量
 
-`run.sh` 启动时会自动加载项目根目录 `.env`。你可以在 shell 中 `export`，也可以写到 `.env`。
+`uv run start|stop|restart|status|logs` 会自动加载项目根目录 `.env`。你可以在 shell 中 `export`，也可以写到 `.env`。
 
 `.env` 示例：
 
@@ -66,7 +66,12 @@ export TG_THINKING_STATUS_INTERVAL_MS=900
 export TG_HTTP_MAX_RETRIES=2
 export TG_HTTP_RETRY_BASE_MS=300
 export TG_HTTP_RETRY_MAX_MS=3000
-export TG_PROXY_URL="http://127.0.0.1:7897"         # 可选；未设置时回退到 HTTPS_PROXY/http_proxy
+
+# 代理（可选，仅在 VPN/网络策略需要时配置）
+export TG_PROXY_URL="http://127.0.0.1:7897"
+# 或：
+export HTTPS_PROXY="http://127.0.0.1:7897"
+export HTTP_PROXY="http://127.0.0.1:7897"
 
 # Codex
 export DEFAULT_CWD="/path/to/your/project"
@@ -86,16 +91,16 @@ export CLAUDE_PERMISSION_MODE="default"
 ### 3) 启动
 
 ```bash
-./run.sh start
+uv run start
 ```
 
 常用命令：
 
 ```bash
-./run.sh stop
-./run.sh status
-./run.sh logs
-./run.sh restart
+uv run stop
+uv run status
+uv run logs
+uv run restart
 ```
 
 ## 支持命令
@@ -112,16 +117,17 @@ export CLAUDE_PERMISSION_MODE="default"
 
 ## 目录结构
 
-- `tg_codex_bot.py`：兼容入口
-- `src/tg_codex/app.py`：应用装配与轮询启动
-- `src/tg_codex/config.py`：环境变量解析
-- `src/tg_codex/telegram/router.py`：命令与回调路由
-- `src/tg_codex/telegram/streaming.py`：流式编排
-- `src/tg_codex/telegram/client.py`：Telegram API 封装（含重试）
-- `src/tg_codex/services/codex_runner.py`：异步 Codex 子进程执行
-- `src/tg_codex/services/claude_runner.py`：异步 Claude 子进程执行
-- `src/tg_codex/services/session_store.py`：按 provider 的会话与历史读取
-- `src/tg_codex/services/state_store.py`：按 provider 的 JSON 状态持久化
+- `tiya.py`：启动入口
+- `src/cli.py`：服务管理命令（`start|stop|restart|status|logs`）
+- `src/app.py`：应用装配与轮询启动
+- `src/config.py`：环境变量解析
+- `src/telegram/router.py`：命令与回调路由
+- `src/telegram/streaming.py`：流式编排
+- `src/telegram/client.py`：Telegram API 封装（含重试）
+- `src/services/codex_runner.py`：异步 Codex 子进程执行
+- `src/services/claude_runner.py`：异步 Claude 子进程执行
+- `src/services/session_store.py`：按 provider 的会话与历史读取
+- `src/services/state_store.py`：按 provider 的 JSON 状态持久化
 - `tests/`：pytest 测试集
 
 ## 测试
@@ -134,13 +140,14 @@ uv run pytest
 
 - 当 `TG_STREAM_ENABLED` 未设置时，仍兼容旧变量 `TELEGRAM_ENABLE_DRAFT_STREAM`。
 - 当前架构按设计仅支持长轮询模式。
+- `run.sh` 已移除，仅保留 `uv run <command>`。
 
 ## 简单 Prompt 很慢时的排查
 
 如果 Telegram 中长时间停留在 `思考中...`，通常瓶颈不在 Telegram 发消息，而在模型子进程的网络链路。
 
-- 检查代理变量是否可用（`TG_PROXY_URL` 或 `HTTPS_PROXY`）。
+- 如果开启了 VPN，检查可选代理变量是否可用（`TG_PROXY_URL` 或 `HTTPS_PROXY`）。
 - 在同一 shell 里直接执行：
   - `codex exec --json --skip-git-repo-check "你是谁？"`
   - `claude -p --verbose --output-format stream-json "你是谁？"`
-- `run.sh` 已做代理变量名标准化（大小写），避免代理变量传递异常导致长时间无首 token。
+- `uv run start` 已做代理变量名标准化（大小写），避免代理变量传递异常导致长时间无首 token。
