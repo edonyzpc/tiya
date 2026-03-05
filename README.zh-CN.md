@@ -61,11 +61,17 @@ export TG_STREAM_ENABLED=1
 export TG_STREAM_EDIT_INTERVAL_MS=700
 export TG_STREAM_MIN_DELTA_CHARS=8
 export TG_THINKING_STATUS_INTERVAL_MS=900
+export TG_STREAM_RETRY_COOLDOWN_MS=15000
+export TG_STREAM_MAX_CONSECUTIVE_PREVIEW_ERRORS=2
+export TG_STREAM_PREVIEW_FAILFAST=1
 
 # 网络重试
 export TG_HTTP_MAX_RETRIES=2
 export TG_HTTP_RETRY_BASE_MS=300
 export TG_HTTP_RETRY_MAX_MS=3000
+
+# 单实例锁（同一个 Bot Token）
+export TG_INSTANCE_LOCK_PATH="./.runtime/bot.lock"
 
 # 代理（可选，仅在 VPN/网络策略需要时配置）
 export TG_PROXY_URL="http://127.0.0.1:7897"
@@ -141,6 +147,7 @@ uv run pytest
 - 当 `TG_STREAM_ENABLED` 未设置时，仍兼容旧变量 `TELEGRAM_ENABLE_DRAFT_STREAM`。
 - 当前架构按设计仅支持长轮询模式。
 - `run.sh` 已移除，仅保留 `uv run <command>`。
+- 仅使用 `uv run start` 启动。不要再额外运行 `python -m tg_codex` 等同 token 轮询进程。
 
 ## 简单 Prompt 很慢时的排查
 
@@ -151,3 +158,11 @@ uv run pytest
   - `codex exec --json --skip-git-repo-check "你是谁？"`
   - `claude -p --verbose --output-format stream-json "你是谁？"`
 - `uv run start` 已做代理变量名标准化（大小写），避免代理变量传递异常导致长时间无首 token。
+
+## “半句卡住”排查
+
+- `tiya` 已对同 token 启用实例锁；若看到 `instance lock rejected`，说明已有实例占用。
+- 可先执行：
+  - `uv run stop`
+  - `ps -ef | rg "tiya.py|python -m tg_codex"`
+- 遇到 Telegram 限流时，流式预览会自动降级为 `typing + 最终消息`，最终完整答案仍会发送。

@@ -61,11 +61,17 @@ export TG_STREAM_ENABLED=1
 export TG_STREAM_EDIT_INTERVAL_MS=700
 export TG_STREAM_MIN_DELTA_CHARS=8
 export TG_THINKING_STATUS_INTERVAL_MS=900
+export TG_STREAM_RETRY_COOLDOWN_MS=15000
+export TG_STREAM_MAX_CONSECUTIVE_PREVIEW_ERRORS=2
+export TG_STREAM_PREVIEW_FAILFAST=1
 
 # HTTP retry
 export TG_HTTP_MAX_RETRIES=2
 export TG_HTTP_RETRY_BASE_MS=300
 export TG_HTTP_RETRY_MAX_MS=3000
+
+# Single-instance lock (same bot token)
+export TG_INSTANCE_LOCK_PATH="./.runtime/bot.lock"
 
 # Optional proxy (use when VPN / network policy requires it)
 export TG_PROXY_URL="http://127.0.0.1:7897"
@@ -141,6 +147,7 @@ uv run pytest
 - Legacy env `TELEGRAM_ENABLE_DRAFT_STREAM` is still honored when `TG_STREAM_ENABLED` is unset.
 - Polling mode only by design in current architecture.
 - `run.sh` has been removed. Use `uv run <command>` only.
+- Start with `uv run start` only. Do not run extra polling processes (for example `python -m tg_codex`) with the same bot token.
 
 ## Troubleshooting Slow First Token
 
@@ -151,3 +158,11 @@ If Telegram shows `思考中...` for a long time on simple prompts, the bottlene
   - `codex exec --json --skip-git-repo-check "who are you?"`
   - `claude -p --verbose --output-format stream-json "who are you?"`
 - `uv run start` normalizes proxy env names (uppercase/lowercase) to avoid common proxy propagation issues.
+
+## Troubleshooting Stream Stuck Halfway
+
+- `tiya` now enforces a per-token instance lock and exits early if another instance is running.
+- If startup fails with "instance lock rejected", stop old process first:
+  - `uv run stop`
+  - `ps -ef | rg "tiya.py|python -m tg_codex"`
+- During Telegram rate limits, preview stream can auto-degrade to `typing + final message`; final answer delivery is still guaranteed.

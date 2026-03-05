@@ -38,10 +38,14 @@ export TG_STREAM_ENABLED=1
 export TG_STREAM_EDIT_INTERVAL_MS=700
 export TG_STREAM_MIN_DELTA_CHARS=8
 export TG_THINKING_STATUS_INTERVAL_MS=900
+export TG_STREAM_RETRY_COOLDOWN_MS=15000
+export TG_STREAM_MAX_CONSECUTIVE_PREVIEW_ERRORS=2
+export TG_STREAM_PREVIEW_FAILFAST=1
 
 export TG_HTTP_MAX_RETRIES=2
 export TG_HTTP_RETRY_BASE_MS=300
 export TG_HTTP_RETRY_MAX_MS=3000
+export TG_INSTANCE_LOCK_PATH="./.runtime/bot.lock"
 
 # Optional proxy (only if VPN / network policy needs it)
 export TG_PROXY_URL="http://127.0.0.1:7897"
@@ -87,3 +91,4 @@ uv run restart
 - Polling mode only.
 - Legacy variable `TELEGRAM_ENABLE_DRAFT_STREAM` is still supported as fallback.
 - `run.sh` has been removed. Use `uv run <command>`.
+- Use `uv run start` as the only startup entry. Avoid extra polling process for the same token (for example `python -m tg_codex`).
