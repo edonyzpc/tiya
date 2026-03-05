@@ -9,7 +9,7 @@ from aiogram.exceptions import (
     TelegramRetryAfter,
     TelegramServerError,
 )
-from aiogram.types import BotCommand, InlineKeyboardMarkup, MenuButtonCommands, Message
+from aiogram.types import BotCommand, InlineKeyboardMarkup, LinkPreviewOptions, MenuButtonCommands, Message, MessageEntity
 
 from logging_utils import log
 
@@ -101,14 +101,25 @@ class TelegramClient:
         reply_to: Optional[int] = None,
         reply_markup: Optional[Any] = None,
         message_thread_id: Optional[int] = None,
+        parse_mode: Optional[str] = None,
+        entities: Optional[list[MessageEntity]] = None,
+        disable_web_page_preview: Optional[bool] = None,
+        link_preview_options: Optional[LinkPreviewOptions] = None,
     ) -> None:
-        for part in self.chunk_text(text, size=min(3800, MAX_TELEGRAM_TEXT)):
+        parts = [text]
+        if parse_mode is None and not entities:
+            parts = self.chunk_text(text, size=min(3800, MAX_TELEGRAM_TEXT))
+        for part in parts:
             await self.send_message_with_result(
                 chat_id=chat_id,
                 text=part,
                 reply_to=reply_to,
                 reply_markup=reply_markup,
                 message_thread_id=message_thread_id,
+                parse_mode=parse_mode,
+                entities=entities,
+                disable_web_page_preview=disable_web_page_preview,
+                link_preview_options=link_preview_options,
             )
 
     async def send_message_with_result(
@@ -118,6 +129,10 @@ class TelegramClient:
         reply_to: Optional[int] = None,
         reply_markup: Optional[Any] = None,
         message_thread_id: Optional[int] = None,
+        parse_mode: Optional[str] = None,
+        entities: Optional[list[MessageEntity]] = None,
+        disable_web_page_preview: Optional[bool] = None,
+        link_preview_options: Optional[LinkPreviewOptions] = None,
     ) -> Message:
         markup = self._normalize_markup(reply_markup)
 
@@ -128,6 +143,10 @@ class TelegramClient:
                 reply_to_message_id=reply_to,
                 reply_markup=markup,
                 message_thread_id=message_thread_id,
+                parse_mode=parse_mode,
+                entities=entities,
+                disable_web_page_preview=disable_web_page_preview,
+                link_preview_options=link_preview_options,
             )
 
         return await self._call_with_retries("sendMessage", _call)
@@ -162,12 +181,20 @@ class TelegramClient:
         message_id: int,
         text: str,
         fail_fast_retry_after: bool = False,
+        parse_mode: Optional[str] = None,
+        entities: Optional[list[MessageEntity]] = None,
+        disable_web_page_preview: Optional[bool] = None,
+        link_preview_options: Optional[LinkPreviewOptions] = None,
     ) -> Message:
         async def _call() -> Message:
             return await self.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=message_id,
                 text=text,
+                parse_mode=parse_mode,
+                entities=entities,
+                disable_web_page_preview=disable_web_page_preview,
+                link_preview_options=link_preview_options,
             )
 
         return await self._call_with_retries(

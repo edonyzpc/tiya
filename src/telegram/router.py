@@ -12,6 +12,7 @@ from services.runner_protocol import RunnerProtocol
 from services.session_store import CodexSessionStore, SessionStoreProtocol
 from services.state_store import StateStore
 from telegram.client import TelegramClient
+from telegram.rendering import RenderProfile, TelegramMessageRenderer
 from telegram.streaming import StreamOrchestrator, TypingStatus
 
 BOT_COMMANDS: list[dict[str, str]] = [
@@ -44,6 +45,7 @@ class TgCodexService:
         stream_retry_cooldown_ms: int,
         stream_max_consecutive_preview_errors: int,
         stream_preview_failfast: bool,
+        renderer: Optional[TelegramMessageRenderer] = None,
     ):
         self.api = api
         self.session_stores = session_stores
@@ -59,6 +61,7 @@ class TgCodexService:
         self.stream_retry_cooldown_ms = max(0, stream_retry_cooldown_ms)
         self.stream_max_consecutive_preview_errors = max(1, stream_max_consecutive_preview_errors)
         self.stream_preview_failfast = bool(stream_preview_failfast)
+        self.renderer = renderer
 
     async def setup_bot_menu(self) -> None:
         # Write command menu for default + common language overrides.
@@ -173,24 +176,73 @@ class TgCodexService:
             return parts[1], parts[2]
         return self.state.get_active_provider(user_id), data[4:]
 
+    async def _send_profiled_message(
+        self,
+        chat_id: int,
+        text: str,
+        profile: RenderProfile,
+        reply_to: Optional[int] = None,
+        reply_markup: Optional[InlineKeyboardMarkup] = None,
+    ) -> None:
+        if self.renderer is None:
+            await self.api.send_message(chat_id, text, reply_to=reply_to, reply_markup=reply_markup)
+            return
+
+        render_result = self.renderer.render_text(text, profile)
+        fallback_count = 0
+        total = len(render_result.chunks)
+        for idx, chunk in enumerate(render_result.chunks):
+            attach_reply_to = reply_to if idx == 0 else None
+            attach_markup = reply_markup if idx == total - 1 else None
+            try:
+                await self.api.send_message(
+                    chat_id=chat_id,
+                    text=chunk.text,
+                    reply_to=attach_reply_to,
+                    reply_markup=attach_markup,
+                    parse_mode=chunk.parse_mode,
+                    disable_web_page_preview=chunk.disable_web_page_preview,
+                )
+            except Exception as exc:
+                fallback_count += 1
+                if not self.renderer.fail_open:
+                    raise
+                log(f"rendered message fallback: profile={profile.value} err={exc}")
+                await self.api.send_message(
+                    chat_id=chat_id,
+                    text=chunk.fallback_text,
+                    reply_to=attach_reply_to,
+                    reply_markup=attach_markup,
+                    disable_web_page_preview=chunk.disable_web_page_preview,
+                )
+        log(
+            "render summary: "
+            f"profile={profile.value} mode={render_result.render_mode} "
+            f"chunks={total} fallback_chunks={fallback_count} parse_errors={render_result.parse_errors}"
+        )
+
     async def _send_help(self, chat_id: int, reply_to: int) -> None:
-        await self.api.send_message(
-            chat_id,
-            "\n".join(
-                [
-                    "可用命令:",
-                    "/provider [codex|claude] - 查看或切换 provider",
-                    "/sessions [N] - 查看当前 provider 最近 N 条会话（标题 + 编号）",
-                    "/use <编号|session_id> - 切换当前 provider 会话",
-                    "/history [编号|session_id] [N] - 查看当前 provider 会话最近 N 条消息",
-                    "/new [cwd] - 当前 provider 进入新会话模式（下一条普通消息会新建 session）",
-                    "/status - 查看当前 provider 与绑定会话",
-                    "/ask <内容> - 在当前 provider 手动提问（可选）",
-                    "执行 /sessions 后，可直接发送编号切换会话",
-                    "执行 /sessions 后，也可点击按钮直接切换会话",
-                    "直接发普通消息即可对话（会自动续聊当前 session）",
-                ]
-            ),
+        content = "\n".join(
+            [
+                "# 可用命令",
+                "",
+                "## Provider 与会话",
+                "- `/provider [codex|claude]` 查看或切换 provider",
+                "- `/sessions [N]` 查看当前 provider 最近 N 条会话",
+                "- `/use <编号|session_id>` 切换当前 provider 会话",
+                "- `/history [编号|session_id] [N]` 查看会话最近 N 条消息",
+                "- `/new [cwd]` 进入新会话模式",
+                "- `/status` 查看当前 provider 与会话状态",
+                "- `/ask <内容>` 在当前 provider 手动提问",
+                "",
+                "> 执行 `/sessions` 后，可直接发送编号或点击按钮切换会话。",
+                "> 直接发送普通消息即可续聊当前 session。",
+            ]
+        )
+        await self._send_profiled_message(
+            chat_id=chat_id,
+            text=content,
+            profile=RenderProfile.COMMAND_HELP,
             reply_to=reply_to,
         )
 
@@ -252,24 +304,32 @@ class TgCodexService:
             await self.api.send_message(chat_id, f"未找到 {provider} 本地会话记录。", reply_to=reply_to)
             return
 
-        lines = [f"最近会话 ({provider})（用 /use 编号 切换）:"]
+        lines = [
+            f"# 最近会话",
+            f"provider: `{provider}`",
+            "用 `/use 编号` 切换，或点击下方按钮。",
+            "",
+        ]
         session_ids = [s.session_id for s in items]
         keyboard_rows: list[list[InlineKeyboardButton]] = []
         for i, session in enumerate(items, start=1):
             short_id = session.session_id[:8]
             cwd_name = Path(session.cwd).name or session.cwd
-            lines.append(f"{i}. {session.title} | {short_id} | {cwd_name}")
+            lines.append(f"{i}. **{session.title}**")
+            lines.append(f"session: `{short_id}` | cwd: `{cwd_name}`")
             keyboard_rows.append(
                 [InlineKeyboardButton(text=f"切换 {i}", callback_data=f"use:{provider}:{session.session_id}")]
             )
 
-        lines.append("直接发送编号即可切换（例如发送: 1）")
+        lines.append("")
+        lines.append("> 也可直接发送编号切换，例如发送 `1`。")
         markup = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
-        await self.api.send_message(
+        await self._send_profiled_message(
             chat_id,
             "\n".join(lines),
             reply_to=reply_to,
             reply_markup=markup,
+            profile=RenderProfile.SESSIONS,
         )
 
         self.state.set_last_session_ids(user_id, session_ids, provider=provider)
@@ -398,15 +458,23 @@ class TgCodexService:
             return
 
         lines = [
-            f"会话历史 ({provider}): {meta.title}",
-            f"session: {meta.session_id}",
-            f"显示最近 {len(messages)} 条消息:",
+            "# 会话历史",
+            f"provider: `{provider}`",
+            f"title: {meta.title}",
+            f"session: `{meta.session_id}`",
+            f"显示最近 `{len(messages)}` 条消息：",
+            "",
         ]
         for i, (role, message) in enumerate(messages, start=1):
             role_zh = "用户" if role == "user" else "助手"
-            lines.append(f"{i}. [{role_zh}] {CodexSessionStore.compact_message(message)}")
+            lines.append(f"{i}. **[{role_zh}]** {CodexSessionStore.compact_message(message)}")
 
-        await self.api.send_message(chat_id, "\n".join(lines), reply_to=reply_to)
+        await self._send_profiled_message(
+            chat_id=chat_id,
+            text="\n".join(lines),
+            profile=RenderProfile.HISTORY,
+            reply_to=reply_to,
+        )
 
     def _resolve_session_selector(
         self,
@@ -434,10 +502,18 @@ class TgCodexService:
     ) -> None:
         session_id, cwd = self.state.get_active(user_id, provider=provider)
         if not session_id:
-            await self.api.send_message(
+            await self._send_profiled_message(
                 chat_id,
-                f"当前 provider: {provider}\n当前没有绑定会话。可先 /sessions + /use，或 /new 后直接发消息。",
+                "\n".join(
+                    [
+                        "# 当前状态",
+                        f"provider: `{provider}`",
+                        "session: `未绑定`",
+                        "提示: 先执行 `/sessions` + `/use`，或 `/new` 后直接发消息。",
+                    ]
+                ),
                 reply_to=reply_to,
+                profile=RenderProfile.COMMAND_STATUS,
             )
             return
 
@@ -447,16 +523,20 @@ class TgCodexService:
         if meta:
             title = meta.title
 
-        await self.api.send_message(
+        await self._send_profiled_message(
             chat_id,
-            (
-                f"当前 provider: {provider}\n"
-                f"当前会话:\n{title}\n"
-                f"session: {session_id}\n"
-                f"cwd: {cwd or str(self.default_cwd)}\n"
-                f"支持与本地 {provider.capitalize()} 客户端交替续聊。"
+            "\n".join(
+                [
+                    "# 当前状态",
+                    f"provider: `{provider}`",
+                    f"title: {title}",
+                    f"session: `{session_id}`",
+                    f"cwd: `{cwd or str(self.default_cwd)}`",
+                    f"说明: 支持与本地 `{provider}` 客户端交替续聊。",
+                ]
             ),
             reply_to=reply_to,
+            profile=RenderProfile.COMMAND_STATUS,
         )
 
     async def _handle_ask(
@@ -546,6 +626,7 @@ class TgCodexService:
             retry_cooldown_ms=self.stream_retry_cooldown_ms,
             max_consecutive_preview_errors=self.stream_max_consecutive_preview_errors,
             preview_failfast=self.stream_preview_failfast,
+            renderer=self.renderer,
         )
         await orchestrator.start()
 

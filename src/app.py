@@ -13,6 +13,7 @@ from services.runner_protocol import RunnerProtocol
 from services.session_store import ClaudeSessionStore, CodexSessionStore
 from services.state_store import StateStore
 from telegram.client import TelegramClient
+from telegram.rendering import TelegramMessageRenderer
 from telegram.router import TgCodexService, build_router
 
 
@@ -71,6 +72,15 @@ async def run() -> None:
         request_retry_base_ms=config.tg_http_retry_base_ms,
         request_retry_max_ms=config.tg_http_retry_max_ms,
     )
+    renderer = TelegramMessageRenderer(
+        enabled=config.tg_formatting_enabled,
+        final_only=config.tg_formatting_final_only,
+        style=config.tg_formatting_style,
+        mode=config.tg_formatting_mode,
+        link_preview_policy=config.tg_link_preview_policy,
+        fail_open=config.tg_formatting_fail_open,
+        backend=config.tg_formatting_backend,
+    )
 
     session_stores = {
         "codex": CodexSessionStore(config.codex_session_root),
@@ -101,6 +111,15 @@ async def run() -> None:
         "[info] provider defaults "
         f"(active={config.default_provider}, codex_bin={config.codex_bin}, claude_bin={config.claude_bin})"
     )
+    log(
+        "[info] TG formatting "
+        f"(enabled={str(config.tg_formatting_enabled).lower()}, "
+        f"final_only={str(config.tg_formatting_final_only).lower()}, "
+        f"style={config.tg_formatting_style}, mode={config.tg_formatting_mode}, "
+        f"link_preview={config.tg_link_preview_policy}, "
+        f"fail_open={str(config.tg_formatting_fail_open).lower()}, "
+        f"backend={config.tg_formatting_backend})"
+    )
 
     service = TgCodexService(
         api=api,
@@ -117,6 +136,7 @@ async def run() -> None:
         stream_retry_cooldown_ms=config.tg_stream_retry_cooldown_ms,
         stream_max_consecutive_preview_errors=config.tg_stream_max_consecutive_preview_errors,
         stream_preview_failfast=config.tg_stream_preview_failfast,
+        renderer=renderer,
     )
 
     dispatcher = Dispatcher()

@@ -4,6 +4,10 @@ from typing import Literal, Optional
 
 
 AgentProvider = Literal["codex", "claude"]
+FormattingStyle = Literal["light", "medium", "strong"]
+FormattingMode = Literal["html", "plain"]
+LinkPreviewPolicy = Literal["auto", "off"]
+FormattingBackend = Literal["builtin", "telegramify", "sulguk"]
 
 
 @dataclass
@@ -70,3 +74,10 @@ class AppConfig:
     tg_stream_retry_cooldown_ms: int
     tg_stream_max_consecutive_preview_errors: int
     tg_stream_preview_failfast: bool
+    tg_formatting_enabled: bool
+    tg_formatting_final_only: bool
+    tg_formatting_style: FormattingStyle
+    tg_formatting_mode: FormattingMode
+    tg_link_preview_policy: LinkPreviewPolicy
+    tg_formatting_fail_open: bool
+    tg_formatting_backend: FormattingBackend

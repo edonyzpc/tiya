@@ -3,7 +3,14 @@ import shutil
 from pathlib import Path
 from typing import Optional, cast
 
-from domain.models import AgentProvider, AppConfig
+from domain.models import (
+    AgentProvider,
+    AppConfig,
+    FormattingBackend,
+    FormattingMode,
+    FormattingStyle,
+    LinkPreviewPolicy,
+)
 
 
 def env(name: str, default: Optional[str] = None) -> Optional[str]:
@@ -82,6 +89,34 @@ def parse_bool(raw: Optional[str], default: bool) -> bool:
     if value in ("0", "false", "no", "n", "off"):
         return False
     return default
+
+
+def parse_formatting_style(raw: Optional[str]) -> FormattingStyle:
+    value = (raw or "strong").strip().lower()
+    if value not in ("light", "medium", "strong"):
+        value = "strong"
+    return cast(FormattingStyle, value)
+
+
+def parse_formatting_mode(raw: Optional[str]) -> FormattingMode:
+    value = (raw or "html").strip().lower()
+    if value not in ("html", "plain"):
+        value = "html"
+    return cast(FormattingMode, value)
+
+
+def parse_link_preview_policy(raw: Optional[str]) -> LinkPreviewPolicy:
+    value = (raw or "auto").strip().lower()
+    if value not in ("auto", "off"):
+        value = "auto"
+    return cast(LinkPreviewPolicy, value)
+
+
+def parse_formatting_backend(raw: Optional[str]) -> FormattingBackend:
+    value = (raw or "builtin").strip().lower()
+    if value not in ("builtin", "telegramify", "sulguk"):
+        value = "builtin"
+    return cast(FormattingBackend, value)
 
 
 def resolve_tg_stream_enabled() -> bool:
@@ -168,4 +203,11 @@ def load_config() -> AppConfig:
             minimum=1,
         ),
         tg_stream_preview_failfast=parse_bool(env("TG_STREAM_PREVIEW_FAILFAST", "1"), True),
+        tg_formatting_enabled=parse_bool(env("TG_FORMATTING_ENABLED", "1"), True),
+        tg_formatting_final_only=parse_bool(env("TG_FORMATTING_FINAL_ONLY", "1"), True),
+        tg_formatting_style=parse_formatting_style(env("TG_FORMATTING_STYLE", "strong")),
+        tg_formatting_mode=parse_formatting_mode(env("TG_FORMATTING_MODE", "html")),
+        tg_link_preview_policy=parse_link_preview_policy(env("TG_LINK_PREVIEW_POLICY", "auto")),
+        tg_formatting_fail_open=parse_bool(env("TG_FORMATTING_FAIL_OPEN", "1"), True),
+        tg_formatting_backend=parse_formatting_backend(env("TG_FORMATTING_BACKEND", "builtin")),
     )
