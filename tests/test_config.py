@@ -44,6 +44,10 @@ def test_load_config_defaults(monkeypatch, tmp_path: Path):
     assert config.claude_bin
     assert config.claude_model is None
     assert config.claude_permission_mode == "default"
+    assert config.tg_instance_lock_path == Path("./.runtime/bot.lock")
+    assert config.tg_stream_retry_cooldown_ms == 15000
+    assert config.tg_stream_max_consecutive_preview_errors == 2
+    assert config.tg_stream_preview_failfast is True
 
 
 def test_resolve_tg_proxy_precedence(monkeypatch):

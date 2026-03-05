@@ -41,7 +41,14 @@ class FakeTelegramClient:
         )
         return SimpleNamespace(message_id=777)
 
-    async def send_message_draft(self, chat_id, draft_id, text, message_thread_id=None):
+    async def send_message_draft(
+        self,
+        chat_id,
+        draft_id,
+        text,
+        message_thread_id=None,
+        fail_fast_retry_after=False,
+    ):
         self.send_message_draft_calls.append(
             {
                 "chat_id": chat_id,
@@ -51,7 +58,7 @@ class FakeTelegramClient:
         )
         return True
 
-    async def edit_message_text(self, chat_id, message_id, text):
+    async def edit_message_text(self, chat_id, message_id, text, fail_fast_retry_after=False):
         self.edit_message_text_calls.append(
             {
                 "chat_id": chat_id,
@@ -221,6 +228,9 @@ def _build_service(
         stream_edit_interval_ms=700,
         stream_min_delta_chars=8,
         thinking_status_interval_ms=900,
+        stream_retry_cooldown_ms=15000,
+        stream_max_consecutive_preview_errors=2,
+        stream_preview_failfast=True,
     )
     return service, api, state, codex_runner, claude_runner
 

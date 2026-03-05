@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import cli
+from instance_lock import BotInstanceLock
 
 
 def test_parse_dotenv_line_handles_export_quote_and_comment():
@@ -127,3 +128,73 @@ def test_start_uses_new_entry_and_writes_pid(monkeypatch, tmp_path: Path):
     assert called["cmd"][1] == str(entry_file)
     assert called["cwd"] == str(tmp_path)
     assert called["start_new_session"] is True
+
+
+def test_start_rejects_when_instance_lock_is_occupied(monkeypatch, tmp_path: Path):
+    runtime_dir = tmp_path / ".runtime"
+    entry_file = tmp_path / "tiya.py"
+    entry_file.write_text("print('ok')\n", encoding="utf-8")
+
+    monkeypatch.setattr(cli, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(cli, "RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr(cli, "PID_FILE", runtime_dir / "bot.pid")
+    monkeypatch.setattr(cli, "LOG_FILE", runtime_dir / "bot.log")
+    monkeypatch.setattr(cli, "STATE_PATH", runtime_dir / "bot_state.json")
+    monkeypatch.setattr(cli, "BOT_ENTRY", entry_file)
+    monkeypatch.setattr(cli, "validate_tg_config", lambda: None)
+    monkeypatch.setattr(cli, "validate_shared_config", lambda: None)
+    monkeypatch.setattr(cli, "has_tg_config", lambda: True)
+    monkeypatch.setattr(
+        cli,
+        "_build_child_env",
+        lambda: {"TELEGRAM_BOT_TOKEN": "123456:abcdefghijklmnopqrstuvwxyz12345"},
+    )
+    monkeypatch.setattr(cli, "_probe_instance_lock", lambda env: (False, "occupied"))
+
+    called = {}
+
+    def _fake_popen(*args, **kwargs):
+        called["popen_called"] = True
+        raise AssertionError("Popen should not be called when lock is occupied")
+
+    monkeypatch.setattr(cli.subprocess, "Popen", _fake_popen)
+
+    rc = cli.start()
+
+    assert rc == 1
+    assert "popen_called" not in called
+
+
+def test_probe_instance_lock_allows_stale_lock_file(tmp_path: Path):
+    lock_path = tmp_path / ".runtime" / "bot.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text('{"pid":999999,"started_at":"old"}', encoding="utf-8")
+
+    env = {
+        "TELEGRAM_BOT_TOKEN": "123456:abcdefghijklmnopqrstuvwxyz12345",
+        "TG_INSTANCE_LOCK_PATH": str(lock_path),
+    }
+
+    ok, msg = cli._probe_instance_lock(env)
+
+    assert ok is True
+    assert msg == ""
+
+
+def test_probe_instance_lock_rejects_when_held(tmp_path: Path):
+    lock_base = tmp_path / ".runtime" / "bot.lock"
+    token = "123456:abcdefghijklmnopqrstuvwxyz12345"
+    holder = BotInstanceLock(lock_base, token)
+    acquired, _ = holder.acquire()
+    assert acquired is True
+
+    try:
+        env = {
+            "TELEGRAM_BOT_TOKEN": token,
+            "TG_INSTANCE_LOCK_PATH": str(lock_base),
+        }
+        ok, msg = cli._probe_instance_lock(env)
+        assert ok is False
+        assert "owner_pid=" in msg
+    finally:
+        holder.release()
