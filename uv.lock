@@ -856,7 +856,7 @@ asyncio = [
 ]
 
 [[package]]
-name = "tg-codex"
+name = "tiya"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
