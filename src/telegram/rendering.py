@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Protocol
 
-from domain.models import FormattingBackend, FormattingMode, FormattingStyle, LinkPreviewPolicy
+from ..domain.models import FormattingBackend, FormattingMode, FormattingStyle, LinkPreviewPolicy
 
 
 CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
@@ -18,6 +18,10 @@ LIST_RE = re.compile(r"^\s*(?:[-*+]|(\d+)\.)\s+(.+)$")
 QUOTE_RE = re.compile(r"^\s*>\s?(.*)$")
 KEY_VALUE_RE = re.compile(r"^([A-Za-z0-9_\-\u4e00-\u9fff（）() /\[\]]{1,64}):\s*(.+)$")
 CODE_PLACEHOLDER_RE = re.compile(r"^@@CODE_BLOCK_(\d+)@@$")
+HTML_TOKEN_RE = re.compile(r"(<[^>]+>)")
+HTML_START_TAG_RE = re.compile(r"<([a-zA-Z0-9]+)(?:\s+[^>]*)?>")
+HTML_END_TAG_RE = re.compile(r"</([a-zA-Z0-9]+)>")
+HTML_SELF_CLOSING_TAG_RE = re.compile(r"<([a-zA-Z0-9]+)(?:\s+[^>]*)?/>")
 
 
 class RenderProfile(str, Enum):
@@ -227,7 +231,7 @@ class BuiltinRendererBackend:
         escaped = html.escape(working, quote=False)
 
         escaped = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
-        escaped = re.sub(r"__(.+?)__", r"<b>\1</b>", escaped)
+        escaped = re.sub(r"(?<!\w)__(.+?)__(?!\w)", r"<b>\1</b>", escaped)
         escaped = re.sub(r"~~(.+?)~~", r"<s>\1</s>", escaped)
         escaped = re.sub(r"(?<!\*)\*(?!\s)(.+?)(?<!\s)\*(?!\*)", r"<i>\1</i>", escaped)
 
@@ -265,7 +269,7 @@ class TelegramMessageRenderer:
         self.mode = mode
         self.link_preview_policy = link_preview_policy
         self.fail_open = bool(fail_open)
-        self.backend = backend
+        self.backend = "builtin" if backend != "builtin" else backend
         self.max_chunk_chars = max(100, min(3900, int(max_chunk_chars)))
         self._builtin_backend = BuiltinRendererBackend(style=style)
 
@@ -279,10 +283,7 @@ class TelegramMessageRenderer:
         if self.mode == "plain":
             return self._render_plain(cleaned, render_mode="plain", parse_errors=0)
 
-        backend_errors = 0
         backend = self._resolve_backend()
-        if self.backend != "builtin":
-            backend_errors += 1
 
         try:
             blocks, parse_errors = backend.render_blocks(cleaned, profile)
@@ -302,12 +303,12 @@ class TelegramMessageRenderer:
             return RenderResult(
                 chunks=chunks,
                 render_mode="html",
-                parse_errors=parse_errors + backend_errors,
+                parse_errors=parse_errors,
             )
         except Exception:
             if not self.fail_open:
                 raise
-            return self._render_plain(cleaned, render_mode="plain_fallback", parse_errors=backend_errors + 1)
+            return self._render_plain(cleaned, render_mode="plain_fallback", parse_errors=1)
 
     def _resolve_backend(self) -> RendererBackend:
         # Keep an extension point for future backends.
@@ -387,7 +388,97 @@ class TelegramMessageRenderer:
             if room > 200:
                 parts = self._split_text_by_newline(content, room)
                 return [f"{prefix}{part}{suffix}" for part in parts]
-        return self._split_text_by_newline(block, self.max_chunk_chars)
+        return self._split_html_block(block)
+
+    def _split_html_block(self, block: str) -> list[str]:
+        if len(block) <= self.max_chunk_chars:
+            return [block]
+
+        tokens = [token for token in HTML_TOKEN_RE.split(block) if token]
+        chunks: list[str] = []
+        current: list[str] = []
+        current_len = 0
+        open_tags: list[tuple[str, str]] = []
+
+        def closing_tags() -> list[str]:
+            return [f"</{name}>" for _, name in reversed(open_tags)]
+
+        def closing_length() -> int:
+            return sum(len(tag) for tag in closing_tags())
+
+        def ensure_reopened() -> None:
+            nonlocal current_len
+            if current or not open_tags:
+                return
+            for start_tag, _ in open_tags:
+                current.append(start_tag)
+                current_len += len(start_tag)
+
+        def flush() -> None:
+            nonlocal current_len
+            if not current:
+                return
+            chunks.append("".join(current + closing_tags()))
+            current.clear()
+            current_len = 0
+
+        for token in tokens:
+            if token.startswith("<") and token.endswith(">"):
+                ensure_reopened()
+                if current and current_len + len(token) + closing_length() > self.max_chunk_chars:
+                    flush()
+                    ensure_reopened()
+                current.append(token)
+                current_len += len(token)
+                self._update_tag_stack(open_tags, token)
+                continue
+
+            remaining = token
+            while remaining:
+                ensure_reopened()
+                room = self.max_chunk_chars - current_len - closing_length()
+                if room <= 0 and current:
+                    flush()
+                    ensure_reopened()
+                    room = self.max_chunk_chars - current_len - closing_length()
+                if room <= 0:
+                    break
+                if len(remaining) <= room:
+                    current.append(remaining)
+                    current_len += len(remaining)
+                    remaining = ""
+                    continue
+
+                split_at = remaining.rfind("\n", 0, room + 1)
+                if split_at <= 0:
+                    split_at = remaining.rfind(" ", 0, room + 1)
+                if split_at <= 0:
+                    split_at = room
+                part = remaining[:split_at]
+                current.append(part)
+                current_len += len(part)
+                flush()
+                remaining = remaining[split_at:].lstrip("\n ")
+
+        if current:
+            chunks.append("".join(current + closing_tags()))
+        return [chunk for chunk in chunks if chunk]
+
+    @staticmethod
+    def _update_tag_stack(open_tags: list[tuple[str, str]], token: str) -> None:
+        if HTML_SELF_CLOSING_TAG_RE.fullmatch(token):
+            return
+        end_match = HTML_END_TAG_RE.fullmatch(token)
+        if end_match:
+            name = end_match.group(1)
+            for idx in range(len(open_tags) - 1, -1, -1):
+                if open_tags[idx][1] == name:
+                    del open_tags[idx:]
+                    break
+            return
+        start_match = HTML_START_TAG_RE.fullmatch(token)
+        if start_match:
+            open_tags.append((token, start_match.group(1)))
 
     @staticmethod
     def _split_text_by_newline(text: str, limit: int) -> list[str]:
