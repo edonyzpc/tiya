@@ -22,6 +22,8 @@ class TypingStatus:
         self.interval_sec = interval_sec
         self.message_thread_id = message_thread_id
         self._stop_event = asyncio.Event()
+        self._resume_event = asyncio.Event()
+        self._resume_event.set()
         self._task: Optional[asyncio.Task[None]] = None
 
     def start(self) -> None:
@@ -29,8 +31,15 @@ class TypingStatus:
             return
         self._task = asyncio.create_task(self._run())
 
+    def pause(self) -> None:
+        self._resume_event.clear()
+
+    def resume(self) -> None:
+        self._resume_event.set()
+
     async def stop(self) -> None:
         self._stop_event.set()
+        self._resume_event.set()
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=0.5)
@@ -39,6 +48,12 @@ class TypingStatus:
 
     async def _run(self) -> None:
         while not self._stop_event.is_set():
+            if not self._resume_event.is_set():
+                try:
+                    await asyncio.wait_for(self._resume_event.wait(), timeout=0.2)
+                except asyncio.TimeoutError:
+                    pass
+                continue
             try:
                 await self.api.send_chat_action(
                     self.chat_id,
@@ -276,6 +291,8 @@ class StreamOrchestrator:
         self._started_at = time.monotonic()
         self._thinking_stop = asyncio.Event()
         self._first_output = asyncio.Event()
+        self._interaction_resume = asyncio.Event()
+        self._interaction_resume.set()
         self._thinking_task: Optional[asyncio.Task[None]] = None
         self._stream: Optional[PreviewStream] = None
         self._fallback_placeholder_id: Optional[int] = None
@@ -309,30 +326,8 @@ class StreamOrchestrator:
             return
 
         initial = self._thinking_status_text(0, self._thinking_marquee_frame(0))
-        draft_stream = DraftStream(
-            api=self.api,
-            chat_id=self.chat_id,
-            draft_id=self.reply_to,
-            min_interval_sec=self.stream_edit_interval_ms / 1000.0,
-            min_delta_chars=self.stream_min_delta_chars,
-            fail_fast_retry_after=self.preview_failfast,
-        )
-        self._stream = draft_stream
-        self.stream_mode = "draft"
-        ok = await draft_stream.push(initial)
-        self._collect_push_stats(draft_stream)
-        if ok:
-            self._last_preview_sent_text = initial
-        else:
-            self.preview_errors_total += 1
-            if draft_stream.last_error_kind == "retry_after":
-                await self._on_preview_error(draft_stream, "draft_retry_after_bootstrap")
-            else:
-                self.fallback_triggered = True
-                log(f"sendMessageDraft bootstrap failed: {draft_stream.last_error or 'unknown error'}")
-                self._stream = None
-                if not await self._activate_edit_fallback(initial):
-                    await self._degrade_preview("draft_bootstrap_failed")
+        if not await self._activate_edit_preview(initial, as_fallback=False):
+            await self._degrade_preview("edit_preview_bootstrap_failed")
 
         if self._stream is not None:
             self._latest_preview_text = initial
@@ -382,6 +377,7 @@ class StreamOrchestrator:
     async def stop(self) -> None:
         self._thinking_stop.set()
         self._sender_stop.set()
+        self._interaction_resume.set()
         self._sender_wakeup.set()
         if self._thinking_task is not None and self._thinking_task is not asyncio.current_task():
             try:
@@ -426,6 +422,14 @@ class StreamOrchestrator:
             f"exit_code={summary.exit_code}"
         )
 
+    def pause_for_interaction(self) -> None:
+        self._interaction_resume.clear()
+        self._sender_wakeup.set()
+
+    def resume_after_interaction(self) -> None:
+        self._interaction_resume.set()
+        self._sender_wakeup.set()
+
     @staticmethod
     def _stream_preview_text(text: str) -> str:
         raw = text.strip() or "..."
@@ -464,6 +468,13 @@ class StreamOrchestrator:
     async def _thinking_loop(self) -> None:
         next_tick = time.monotonic() + self._thinking_animation_interval_sec
         while not self._thinking_stop.is_set():
+            if not self._interaction_resume.is_set():
+                try:
+                    await asyncio.wait_for(self._interaction_resume.wait(), timeout=0.2)
+                except asyncio.TimeoutError:
+                    pass
+                next_tick = time.monotonic() + self._thinking_animation_interval_sec
+                continue
             timeout_sec = max(0.0, next_tick - time.monotonic())
             try:
                 await asyncio.wait_for(
@@ -488,6 +499,12 @@ class StreamOrchestrator:
 
     async def _sender_loop(self) -> None:
         while not self._sender_stop.is_set():
+            if not self._interaction_resume.is_set():
+                try:
+                    await asyncio.wait_for(self._interaction_resume.wait(), timeout=0.2)
+                except asyncio.TimeoutError:
+                    pass
+                continue
             if self._stream is None or not self._preview_dirty:
                 try:
                     await asyncio.wait_for(self._sender_wakeup.wait(), timeout=0.2)
@@ -565,8 +582,7 @@ class StreamOrchestrator:
             if phase == "runtime":
                 log(f"sendMessageDraft runtime failed: {error_text or 'unknown error'}")
             self._stream = None
-            self.fallback_triggered = True
-            if await self._activate_edit_fallback(self._latest_preview_text):
+            if await self._activate_edit_preview(self._latest_preview_text, as_fallback=True):
                 self._consecutive_preview_errors = 0
                 self._next_preview_send_at = time.monotonic()
                 self._preview_cooldown_until = 0.0
@@ -576,7 +592,7 @@ class StreamOrchestrator:
             return
 
         if isinstance(stream, EditFallbackStream):
-            log(f"stream edit fallback failed: {error_text or 'unknown error'}")
+            log(f"stream edit preview failed: {error_text or 'unknown error'}")
             if self._consecutive_preview_errors >= self.max_consecutive_preview_errors:
                 await self._degrade_preview("edit_preview_failed")
             return
@@ -595,8 +611,9 @@ class StreamOrchestrator:
         self._preview_dirty = True
         self._sender_wakeup.set()
 
-    async def _activate_edit_fallback(self, initial_text: str) -> bool:
-        self.fallback_triggered = True
+    async def _activate_edit_preview(self, initial_text: str, *, as_fallback: bool) -> bool:
+        if as_fallback:
+            self.fallback_triggered = True
         try:
             sent = await self.api.send_message_with_result(
                 chat_id=self.chat_id,
@@ -604,15 +621,13 @@ class StreamOrchestrator:
                 reply_to=self.reply_to,
             )
         except Exception as exc:
-            log(f"stream fallback bootstrap failed: {exc}")
-            self.stream_mode = "typing_only"
+            log(f"stream preview bootstrap failed: {exc}")
             self._fallback_placeholder_id = None
             return False
 
         message_id = getattr(sent, "message_id", None)
         if not isinstance(message_id, int):
-            log("stream fallback bootstrap failed: missing message_id")
-            self.stream_mode = "typing_only"
+            log("stream preview bootstrap failed: missing message_id")
             self._fallback_placeholder_id = None
             return False
 
@@ -626,25 +641,16 @@ class StreamOrchestrator:
             fail_fast_retry_after=self.preview_failfast,
         )
         self._stream = stream
-        self.stream_mode = "edit_fallback"
-        ok = await stream.push(initial_text)
+        self.stream_mode = "edit_fallback" if as_fallback else "edit_preview"
+        stream._last_sent_text = initial_text
+        stream.sent_updates = 1
+        stream.last_push_state = "sent"
         self._collect_push_stats(stream)
-        if ok:
-            self._last_preview_sent_text = initial_text
-            return True
-
-        self.preview_errors_total += 1
-        if stream.last_error_kind == "retry_after":
-            await self._on_preview_error(stream, "fallback_bootstrap_retry_after")
-            return self.stream_mode != "typing_only"
-
-        log(f"stream fallback first push failed: {stream.last_error or 'unknown error'}")
-        self._stream = None
-        self.stream_mode = "typing_only"
-        return False
+        self._last_preview_sent_text = initial_text
+        return True
 
     async def _degrade_preview(self, reason: str) -> None:
-        if self.stream_mode == "typing_only":
+        if self.stream_mode == "typing_only" and self.degraded_reason:
             return
         self.stream_mode = "typing_only"
         self.degraded_reason = reason
