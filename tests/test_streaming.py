@@ -476,6 +476,13 @@ class TestStreamOrchestrator:
                         disable_web_page_preview=None,
                         fallback_text="full markdown fallback",
                     ),
+                    RenderedText(
+                        text="outro",
+                        parse_mode=None,
+                        entities=None,
+                        disable_web_page_preview=None,
+                        fallback_text="outro",
+                    ),
                 ],
                 render_mode="telegramify",
                 parse_errors=0,
@@ -489,7 +496,7 @@ class TestStreamOrchestrator:
 
         assert len(api.send_document_calls) == 1
         assert api.send_message_calls[0]["text"] == "intro"
-        assert api.send_message_calls[-1]["text"] == "full markdown fallback"
+        assert api.send_message_calls[-1]["text"] == "print(1)\n\noutro"
         assert api.send_message_calls[-1]["parse_mode"] is None
 
     @pytest.mark.asyncio
@@ -510,10 +517,17 @@ class TestStreamOrchestrator:
                     RenderedPhoto(
                         file_name="diagram.webp",
                         file_data=b"img",
-                        caption_text="",
+                        caption_text="photo caption",
                         caption_entities=None,
                         disable_web_page_preview=None,
                         fallback_text="full markdown fallback",
+                    ),
+                    RenderedText(
+                        text="outro",
+                        parse_mode=None,
+                        entities=None,
+                        disable_web_page_preview=None,
+                        fallback_text="outro",
                     ),
                 ],
                 render_mode="telegramify",
@@ -527,4 +541,4 @@ class TestStreamOrchestrator:
         await orchestrator.finalize_success("ignored", reply_to=999)
 
         assert len(api.send_photo_calls) == 1
-        assert api.send_message_calls[-1]["text"] == "full markdown fallback"
+        assert api.send_message_calls[-1]["text"] == "photo caption\n[photo upload failed: diagram.webp]\n\noutro"

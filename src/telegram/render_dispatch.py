@@ -13,6 +13,33 @@ class DispatchStats:
     media_fallback_used: bool
 
 
+def _serialize_media_item_for_plain_fallback(item: RenderedFile | RenderedPhoto) -> str:
+    if isinstance(item, RenderedFile):
+        body = item.file_data.decode("utf-8", errors="replace").strip()
+        if body:
+            return body
+        return item.caption_text.strip()
+
+    parts: list[str] = []
+    caption = item.caption_text.strip()
+    if caption:
+        parts.append(caption)
+    parts.append(f"[photo upload failed: {item.file_name}]")
+    return "\n".join(part for part in parts if part)
+
+
+def _remaining_plain_fallback(render_result: RenderResult, start_idx: int) -> str:
+    parts: list[str] = []
+    for item in render_result.items[start_idx:]:
+        if isinstance(item, RenderedText):
+            value = item.fallback_text.strip()
+        else:
+            value = _serialize_media_item_for_plain_fallback(item).strip()
+        if value:
+            parts.append(value)
+    return "\n\n".join(parts).strip()
+
+
 async def send_render_result(
     api: TelegramClient,
     chat_id: int,
@@ -83,11 +110,12 @@ async def send_render_result(
             media_fallback_used = True
             kind = "file" if isinstance(item, RenderedFile) else "photo"
             log(f"{log_prefix} media fallback: kind={kind} err={exc}")
+            fallback_text = _remaining_plain_fallback(render_result, idx) or item.fallback_text
             await api.send_message(
                 chat_id=chat_id,
-                text=item.fallback_text,
+                text=fallback_text,
                 reply_to=attach_reply_to,
-                reply_markup=attach_markup,
+                reply_markup=reply_markup,
                 disable_web_page_preview=item.disable_web_page_preview,
             )
             break
