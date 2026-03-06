@@ -17,19 +17,17 @@ class FakeRetryAfterError(RuntimeError):
 class FakeTelegramClient:
     def __init__(
         self,
-        draft_fail: bool = False,
         edit_fail: bool = False,
-        draft_retry_after_times: int = 0,
         edit_retry_after_times: int = 0,
         send_message_parse_fail: bool = False,
+        send_message_with_result_fail: bool = False,
         send_document_fail: bool = False,
         send_photo_fail: bool = False,
     ):
-        self.draft_fail = draft_fail
         self.edit_fail = edit_fail
-        self.draft_retry_after_times = max(0, int(draft_retry_after_times))
         self.edit_retry_after_times = max(0, int(edit_retry_after_times))
         self.send_message_parse_fail = bool(send_message_parse_fail)
+        self.send_message_with_result_fail = bool(send_message_with_result_fail)
         self.send_document_fail = bool(send_document_fail)
         self.send_photo_fail = bool(send_photo_fail)
         self.events = []
@@ -40,6 +38,7 @@ class FakeTelegramClient:
         self.send_message_with_result_calls = []
         self.edit_message_text_calls = []
         self.delete_message_calls = []
+        self._next_message_id = 776
 
     async def send_message(
         self,
@@ -134,11 +133,6 @@ class FakeTelegramClient:
     ):
         self.events.append(("send_message_draft", chat_id, draft_id, text))
         self.send_message_draft_calls.append((chat_id, draft_id, text))
-        if self.draft_retry_after_times > 0:
-            self.draft_retry_after_times -= 1
-            raise FakeRetryAfterError(0.1)
-        if self.draft_fail:
-            raise RuntimeError("draft unavailable")
         return True
 
     async def send_message_with_result(
@@ -155,7 +149,10 @@ class FakeTelegramClient:
     ):
         self.events.append(("send_message_with_result", chat_id, text, reply_to))
         self.send_message_with_result_calls.append((chat_id, text, reply_to))
-        return SimpleNamespace(message_id=777)
+        if self.send_message_with_result_fail:
+            raise RuntimeError("preview bootstrap unavailable")
+        self._next_message_id += 1
+        return SimpleNamespace(message_id=self._next_message_id)
 
     async def edit_message_text(
         self,
@@ -163,6 +160,7 @@ class FakeTelegramClient:
         message_id,
         text,
         fail_fast_retry_after=False,
+        reply_markup=None,
         parse_mode=None,
         entities=None,
         disable_web_page_preview=None,
@@ -214,57 +212,58 @@ class TestStreamOrchestrator:
         )
 
     @pytest.mark.asyncio
-    async def test_draft_success_and_final_send_once(self):
-        api = FakeTelegramClient(draft_fail=False)
+    async def test_edit_preview_success_and_final_send_once(self):
+        api = FakeTelegramClient()
         orchestrator = self._orchestrator(api, enabled=True)
         await orchestrator.start()
         await orchestrator.on_partial("hello world from stream")
         await asyncio.sleep(0.25)
         await orchestrator.finalize_success("final answer", reply_to=999)
 
-        assert orchestrator.stream_mode == "draft"
+        assert orchestrator.stream_mode == "edit_preview"
         assert not orchestrator.fallback_triggered
-        assert len(api.send_message_draft_calls) >= 2
+        assert len(api.send_message_with_result_calls) == 1
+        assert len(api.edit_message_text_calls) >= 1
+        assert len(api.send_message_draft_calls) == 0
+        assert len(api.delete_message_calls) == 1
         assert len(api.send_message_calls) == 1
         assert api.send_message_calls[0]["text"] == "final answer"
 
     @pytest.mark.asyncio
-    async def test_draft_failure_triggers_edit_fallback_and_cleanup(self):
-        api = FakeTelegramClient(draft_fail=True, edit_fail=False)
+    async def test_preview_bootstrap_failure_falls_back_to_typing_only(self):
+        api = FakeTelegramClient(send_message_with_result_fail=True)
         orchestrator = self._orchestrator(api, enabled=True)
         await orchestrator.start()
-        await orchestrator.on_partial("stream text after fallback")
-        await asyncio.sleep(0.25)
-        await orchestrator.finalize_success("final answer", reply_to=999)
-
-        assert orchestrator.stream_mode == "edit_fallback"
-        assert orchestrator.fallback_triggered
-        assert len(api.send_message_with_result_calls) >= 1
-        assert len(api.edit_message_text_calls) >= 1
-        assert len(api.delete_message_calls) == 1
-        assert len(api.send_message_calls) == 1
-
-        delete_index = [i for i, evt in enumerate(api.events) if evt[0] == "delete_message"][0]
-        send_index = [i for i, evt in enumerate(api.events) if evt[0] == "send_message"][0]
-        assert delete_index < send_index
-
-    @pytest.mark.asyncio
-    async def test_draft_and_edit_failure_falls_back_to_typing_only(self):
-        api = FakeTelegramClient(draft_fail=True, edit_fail=True)
-        orchestrator = self._orchestrator(api, enabled=True)
-        await orchestrator.start()
-        await orchestrator.on_partial("partial output")
+        await orchestrator.on_partial("stream text after bootstrap failure")
         await asyncio.sleep(0.1)
         await orchestrator.finalize_success("final answer", reply_to=999)
 
         assert orchestrator.stream_mode == "typing_only"
-        assert orchestrator.fallback_triggered
+        assert orchestrator.degraded_reason == "edit_preview_bootstrap_failed"
+        assert len(api.send_message_with_result_calls) == 1
+        assert len(api.edit_message_text_calls) == 0
+        assert len(api.delete_message_calls) == 0
+        assert len(api.send_message_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_repeated_edit_failures_fall_back_to_typing_only_and_cleanup(self):
+        api = FakeTelegramClient(edit_fail=True)
+        orchestrator = self._orchestrator(api, enabled=True)
+        await orchestrator.start()
+        await orchestrator.on_partial("partial output")
+        await asyncio.sleep(0.25)
+        await orchestrator.on_partial("partial output extended")
+        await asyncio.sleep(0.25)
+        await orchestrator.finalize_success("final answer", reply_to=999)
+
+        assert orchestrator.stream_mode == "typing_only"
+        assert orchestrator.degraded_reason == "edit_preview_failed"
         assert len(api.send_message_calls) == 1
         assert len(api.delete_message_calls) == 1
 
     @pytest.mark.asyncio
     async def test_stream_disabled(self):
-        api = FakeTelegramClient(draft_fail=False)
+        api = FakeTelegramClient()
         orchestrator = self._orchestrator(api, enabled=False)
         await orchestrator.start()
         await orchestrator.on_partial("ignored")
@@ -277,7 +276,7 @@ class TestStreamOrchestrator:
 
     @pytest.mark.asyncio
     async def test_stream_throttle_records_drops(self):
-        api = FakeTelegramClient(draft_fail=False)
+        api = FakeTelegramClient()
         orchestrator = self._orchestrator(api, enabled=True)
         await orchestrator.start()
         await orchestrator.on_partial("x" * 40)
@@ -285,23 +284,23 @@ class TestStreamOrchestrator:
         await asyncio.sleep(0.05)
         await orchestrator.finalize_success("final answer", reply_to=999)
 
-        assert orchestrator.stream_mode == "draft"
+        assert orchestrator.stream_mode == "edit_preview"
         assert orchestrator.stream_dropped_by_throttle_total >= 1
 
     @pytest.mark.asyncio
     async def test_reasoning_hint_updates_thinking_preview(self):
-        api = FakeTelegramClient(draft_fail=False)
+        api = FakeTelegramClient()
         orchestrator = self._orchestrator(api, enabled=True)
         await orchestrator.start()
         await orchestrator.on_reasoning("先确认用户意图，再给出简短答复")
         await asyncio.sleep(0.25)
 
-        texts = [call[2] for call in api.send_message_draft_calls]
+        texts = [call[2] for call in api.edit_message_text_calls]
         assert any("先确认用户意图，再给出简短答复" in text for text in texts)
 
     @pytest.mark.asyncio
     async def test_retry_after_triggers_degrade_to_typing_only(self):
-        api = FakeTelegramClient(draft_retry_after_times=3)
+        api = FakeTelegramClient(edit_retry_after_times=3)
         orchestrator = self._orchestrator(api, enabled=True, retry_cooldown_ms=50)
         await orchestrator.start()
         await orchestrator.on_partial("stream text")
@@ -316,17 +315,17 @@ class TestStreamOrchestrator:
 
     @pytest.mark.asyncio
     async def test_stream_min_delta_chars_suppresses_small_preview_updates(self):
-        api = FakeTelegramClient(draft_fail=False)
+        api = FakeTelegramClient()
         orchestrator = self._orchestrator(api, enabled=True, min_delta_chars=10)
         await orchestrator.start()
         await orchestrator.on_partial("hello world")
         await asyncio.sleep(0.25)
-        first_updates = len(api.send_message_draft_calls)
+        first_updates = len(api.edit_message_text_calls)
         await orchestrator.on_partial("hello world!")
         await asyncio.sleep(0.25)
         await orchestrator.finalize_success("final answer", reply_to=999)
 
-        assert len(api.send_message_draft_calls) == first_updates
+        assert len(api.edit_message_text_calls) == first_updates
 
     @pytest.mark.asyncio
     async def test_final_render_uses_html_parse_mode(self):

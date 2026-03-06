@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,10 +21,13 @@ class FakeTelegramClient:
         self.send_photo_calls = []
         self.send_message_draft_calls = []
         self.edit_message_text_calls = []
+        self.edit_message_reply_markup_calls = []
         self.delete_message_calls = []
         self.answer_callback_query_calls = []
+        self.send_chat_action_calls = []
         self.download_telegram_file_calls = []
         self.file_payloads = {}
+        self._next_message_id = 776
 
     async def send_message(
         self,
@@ -63,16 +67,19 @@ class FakeTelegramClient:
         disable_web_page_preview=None,
         link_preview_options=None,
     ):
+        self._next_message_id += 1
         self.send_message_with_result_calls.append(
             {
                 "chat_id": chat_id,
                 "text": text,
                 "reply_to": reply_to,
+                "reply_markup": reply_markup,
                 "parse_mode": parse_mode,
                 "entities": entities,
+                "message_id": self._next_message_id,
             }
         )
-        return SimpleNamespace(message_id=777)
+        return SimpleNamespace(message_id=self._next_message_id)
 
     async def send_document(
         self,
@@ -147,6 +154,7 @@ class FakeTelegramClient:
         message_id,
         text,
         fail_fast_retry_after=False,
+        reply_markup=None,
         parse_mode=None,
         entities=None,
         disable_web_page_preview=None,
@@ -157,7 +165,24 @@ class FakeTelegramClient:
                 "chat_id": chat_id,
                 "message_id": message_id,
                 "text": text,
+                "reply_markup": reply_markup,
                 "parse_mode": parse_mode,
+            }
+        )
+        return True
+
+    async def edit_message_reply_markup(
+        self,
+        chat_id,
+        message_id,
+        reply_markup=None,
+        fail_fast_retry_after=False,
+    ):
+        self.edit_message_reply_markup_calls.append(
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "reply_markup": reply_markup,
             }
         )
         return True
@@ -167,6 +192,13 @@ class FakeTelegramClient:
         return True
 
     async def send_chat_action(self, chat_id, action="typing", message_thread_id=None):
+        self.send_chat_action_calls.append(
+            {
+                "chat_id": chat_id,
+                "action": action,
+                "message_thread_id": message_thread_id,
+            }
+        )
         return True
 
     async def set_my_commands(self, commands, language_code=None):
@@ -314,6 +346,7 @@ def _build_service(
     session_roots: tuple[Path, Path],
     allowed_user_ids=None,
     allowed_cwd_roots: tuple[Path, ...] = (),
+    stream_enabled: bool = False,
 ):
     api = FakeTelegramClient()
     codex_runner = FakeRunner("codex")
@@ -350,7 +383,7 @@ def _build_service(
         allowed_user_ids=allowed_user_ids,
         allowed_cwd_roots=allowed_cwd_roots,
         stream_config=StreamConfig(
-            enabled=False,
+            enabled=stream_enabled,
             edit_interval_ms=700,
             min_delta_chars=8,
             thinking_status_interval_ms=900,
@@ -508,6 +541,8 @@ async def test_sessions_and_callback_switch_are_provider_aware(
     )
     assert (await state.get_active(1, provider="codex"))[0] == "session-1"
     assert api.answer_callback_query_calls
+    assert api.edit_message_reply_markup_calls
+    assert api.edit_message_reply_markup_calls[-1]["message_id"] == 13
 
     await _feed(dp, bot, _message_update(3, "/provider claude", message_id=14))
     await _feed(dp, bot, _message_update(4, "/sessions 1", message_id=15))
@@ -790,4 +825,204 @@ async def test_request_approval_send_failure_cleans_pending_interaction(
     assert await service.interactions.get_pending_interaction(1, "codex") is None
     assert await state.get_pending_interaction(1, provider="codex") is None
     await service.interactions.finish_run(1, "codex", run.run_id)
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_approval_callback_binds_message_id_and_closes_interaction(
+    bot: Bot,
+    tmp_path: Path,
+    session_roots: tuple[Path, Path],
+):
+    service, api, state, _, _ = _build_service(tmp_path, session_roots, allowed_user_ids={1})
+    dp = Dispatcher()
+    dp.include_router(build_router(service))
+    run = await service.interactions.start_run(user_id=1, provider="codex", chat_id=101, chat_type="private")
+    assert run is not None
+
+    task = asyncio.create_task(
+        service._request_approval(
+            chat_id=101,
+            reply_to=11,
+            user_id=1,
+            provider="codex",
+            chat_type="private",
+            request=ApprovalRequest(
+                kind="command",
+                title="Need approval",
+                body="Run a command",
+                command="pwd",
+            ),
+        )
+    )
+
+    await asyncio.sleep(0)
+    pending = await state.get_pending_interaction(1, provider="codex")
+    assert pending is not None
+    assert pending.message_id == 777
+
+    await _feed(
+        dp,
+        bot,
+        {
+            "update_id": 99,
+            "callback_query": {
+                "id": "cq-approval",
+                "from": {"id": 1, "is_bot": False, "first_name": "u"},
+                "chat_instance": "ci",
+                "data": f"ixa:codex:{pending.interaction_id}:accept",
+                "message": {
+                    "message_id": 777,
+                    "date": 1,
+                    "chat": {"id": 101, "type": "private"},
+                    "text": "approval message",
+                },
+            },
+        },
+    )
+
+    assert await task == "accept"
+    assert api.edit_message_reply_markup_calls
+    assert api.edit_message_reply_markup_calls[-1]["message_id"] == 777
+    assert api.edit_message_text_calls
+    assert api.edit_message_text_calls[-1]["message_id"] == 777
+    assert api.edit_message_text_calls[-1]["reply_markup"] is None
+    assert "状态: 已批准一次" in api.edit_message_text_calls[-1]["text"]
+    assert await state.get_pending_interaction(1, provider="codex") is None
+
+    await service.interactions.finish_run(1, "codex", run.run_id)
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_approval_cancel_closes_interaction_message(
+    tmp_path: Path,
+    session_roots: tuple[Path, Path],
+):
+    service, api, state, _, _ = _build_service(tmp_path, session_roots)
+    run = await service.interactions.start_run(user_id=1, provider="codex", chat_id=101, chat_type="private")
+    assert run is not None
+
+    task = asyncio.create_task(
+        service._request_approval(
+            chat_id=101,
+            reply_to=11,
+            user_id=1,
+            provider="codex",
+            chat_type="private",
+            request=ApprovalRequest(
+                kind="command",
+                title="Need approval",
+                body="Run a command",
+                command="pwd",
+            ),
+        )
+    )
+
+    await asyncio.sleep(0)
+    pending = await state.get_pending_interaction(1, provider="codex")
+    assert pending is not None
+    assert pending.message_id == 777
+
+    await service._handle_cancel(chat_id=101, reply_to=12, user_id=1, provider="codex")
+
+    assert await task == "cancel"
+    assert api.edit_message_text_calls
+    assert api.edit_message_text_calls[-1]["message_id"] == 777
+    assert "状态: 已取消" in api.edit_message_text_calls[-1]["text"]
+    assert await state.get_pending_interaction(1, provider="codex") is None
+
+    await service.interactions.finish_run(1, "codex", run.run_id)
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_stream_preview_pauses_while_waiting_for_approval(
+    bot: Bot,
+    tmp_path: Path,
+    session_roots: tuple[Path, Path],
+):
+    class ApprovalRunner(FakeRunner):
+        async def run_prompt(
+            self,
+            prompt,
+            cwd,
+            session_id=None,
+            images=(),
+            on_partial=None,
+            on_reasoning=None,
+            interaction_handler=None,
+            cancel_event=None,
+        ):
+            self.calls.append(
+                {
+                    "prompt": prompt,
+                    "cwd": str(cwd),
+                    "session_id": session_id,
+                    "images": list(images),
+                    "interaction_handler": interaction_handler,
+                    "cancel_event": cancel_event,
+                }
+            )
+            if on_reasoning is not None:
+                await on_reasoning("planning")
+            assert interaction_handler is not None
+            decision = await interaction_handler.request_approval(
+                ApprovalRequest(
+                    kind="file_change",
+                    title="Claude 请求使用 Write",
+                    body="工具: Write\n文件: /tmp/test3",
+                )
+            )
+            if decision == "accept":
+                return AgentRunResult(thread_id="approval-thread", answer="ok", stderr_text="", return_code=0)
+            return AgentRunResult(thread_id="approval-thread", answer="cancelled", stderr_text="", return_code=130)
+
+    service, api, state, _, _ = _build_service(
+        tmp_path,
+        session_roots,
+        allowed_user_ids={1},
+        stream_enabled=True,
+    )
+    service.runners["codex"] = ApprovalRunner("codex")
+    dp = Dispatcher()
+    dp.include_router(build_router(service))
+
+    task = asyncio.create_task(_feed(dp, bot, _message_update(1, "帮我在 /tmp 目录创建一个 test3", message_id=31)))
+    await asyncio.sleep(0.2)
+
+    pending = await state.get_pending_interaction(1, provider="codex")
+    assert pending is not None
+    assert pending.message_id == 778
+    preview_edits_before_wait = len(api.edit_message_text_calls)
+    typing_calls_before_wait = len(api.send_chat_action_calls)
+
+    await asyncio.sleep(1.2)
+
+    assert len(api.edit_message_text_calls) == preview_edits_before_wait
+    assert len(api.send_chat_action_calls) == typing_calls_before_wait
+
+    await _feed(
+        dp,
+        bot,
+        {
+            "update_id": 2,
+            "callback_query": {
+                "id": "cq-stream-approval",
+                "from": {"id": 1, "is_bot": False, "first_name": "u"},
+                "chat_instance": "ci",
+                "data": f"ixa:codex:{pending.interaction_id}:accept",
+                "message": {
+                    "message_id": 778,
+                    "date": 1,
+                    "chat": {"id": 101, "type": "private"},
+                    "text": "approval message",
+                },
+            },
+        },
+    )
+
+    await task
+    assert api.send_message_calls
+    assert api.send_message_calls[-1]["text"] == "ok"
     await service.shutdown()
