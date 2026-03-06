@@ -8,20 +8,19 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import MutableMapping, Optional
+from typing import Callable, MutableMapping, Optional
 
-from instance_lock import BotInstanceLock
+from .instance_lock import BotInstanceLock
+from .runtime_paths import RuntimePaths, list_runtime_instances
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-RUNTIME_DIR = REPO_ROOT / ".runtime"
-PID_FILE = RUNTIME_DIR / "bot.pid"
-LOG_FILE = RUNTIME_DIR / "bot.log"
-STATE_PATH = RUNTIME_DIR / "bot_state.json"
-BOT_ENTRY = REPO_ROOT / "tiya.py"
+BOT_MODULE = "src"
+READY_MARKER = "tiya service ready"
 
 TOKEN_RE = re.compile(r"^[0-9]{6,}:[A-Za-z0-9_-]{20,}$")
 USER_IDS_RE = re.compile(r"^[0-9]+(,[0-9]+)*$")
+MODULE_CMD_RE = re.compile(r"(^|\s)-m\s+src(\s|$)")
 
 PROXY_PRIORITY = ("TG_PROXY_URL", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")
 PROXY_NORMALIZED_KEYS = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")
@@ -153,10 +152,30 @@ def validate_shared_config() -> None:
     _validate_runner_bin("claude", claude_bin, required=default_provider == "claude")
 
 
-def _read_pid_file() -> Optional[int]:
-    if not PID_FILE.is_file():
+def _require_runtime_paths() -> RuntimePaths:
+    token = _env_value(os.environ, "TELEGRAM_BOT_TOKEN")
+    if not token:
+        raise CliError("未配置 TELEGRAM_BOT_TOKEN，无法定位实例目录")
+    return RuntimePaths.for_token(token, os.environ)
+
+
+def _resolve_existing_runtime_paths() -> Optional[RuntimePaths]:
+    token = _env_value(os.environ, "TELEGRAM_BOT_TOKEN")
+    if token:
+        return RuntimePaths.for_token(token, os.environ)
+
+    instances = [paths for paths in list_runtime_instances(os.environ) if paths.instance_dir.exists()]
+    if not instances:
         return None
-    raw = PID_FILE.read_text(encoding="utf-8").strip()
+    if len(instances) > 1:
+        raise CliError("检测到多个实例目录，请设置 TELEGRAM_BOT_TOKEN 或 TIYA_HOME 后再执行")
+    return instances[0]
+
+
+def _read_pid_file(paths: RuntimePaths) -> Optional[int]:
+    if not paths.pid_file.is_file():
+        return None
+    raw = paths.pid_file.read_text(encoding="utf-8").strip()
     if not raw:
         return None
     try:
@@ -165,13 +184,14 @@ def _read_pid_file() -> Optional[int]:
         return None
 
 
-def _write_pid_file(pid: int) -> None:
-    PID_FILE.write_text(str(pid), encoding="utf-8")
+def _write_pid_file(paths: RuntimePaths, pid: int) -> None:
+    paths.instance_dir.mkdir(parents=True, exist_ok=True)
+    paths.pid_file.write_text(str(pid), encoding="utf-8")
 
 
-def _remove_pid_file() -> None:
-    if PID_FILE.exists():
-        PID_FILE.unlink()
+def _remove_pid_file(paths: RuntimePaths) -> None:
+    if paths.pid_file.exists():
+        paths.pid_file.unlink()
 
 
 def _pid_exists(pid: int) -> bool:
@@ -218,9 +238,9 @@ def _read_cmdline(pid: int) -> str:
 def _cmdline_matches(cmdline: str) -> bool:
     if not cmdline:
         return False
-    if str(BOT_ENTRY) in cmdline:
+    if MODULE_CMD_RE.search(cmdline):
         return True
-    return BOT_ENTRY.name in cmdline
+    return "tiya.py" in cmdline
 
 
 def _is_pid_running(pid: Optional[int]) -> bool:
@@ -233,38 +253,32 @@ def _is_pid_running(pid: Optional[int]) -> bool:
     return _cmdline_matches(_read_cmdline(pid))
 
 
-def _find_existing_pid() -> Optional[int]:
-    proc_root = Path("/proc")
-    if not proc_root.is_dir():
+def _read_lock_owner_pid(paths: RuntimePaths) -> Optional[int]:
+    token = _env_value(os.environ, "TELEGRAM_BOT_TOKEN")
+    if not token:
         return None
-
-    this_pid = os.getpid()
-    for entry in proc_root.iterdir():
-        if not entry.name.isdigit():
-            continue
-        pid = int(entry.name)
-        if pid == this_pid:
-            continue
-        if not _pid_exists(pid):
-            continue
-        if _is_zombie(pid):
-            continue
-        if _cmdline_matches(_read_cmdline(pid)):
-            return pid
+    lock = BotInstanceLock(paths.lock_base, token)
+    owner = lock.read_owner()
+    pid = owner.get("pid")
+    if isinstance(pid, int):
+        return pid
+    if isinstance(pid, str) and pid.isdigit():
+        return int(pid)
     return None
 
 
-def tg_is_running() -> tuple[bool, Optional[int]]:
-    pid = _read_pid_file()
+def tg_is_running(paths: RuntimePaths) -> tuple[bool, Optional[int]]:
+    pid = _read_pid_file(paths)
     if _is_pid_running(pid):
         return True, pid
-    _remove_pid_file()
+    _remove_pid_file(paths)
 
-    existing_pid = _find_existing_pid()
-    if existing_pid is None:
-        return False, None
-    _write_pid_file(existing_pid)
-    return True, existing_pid
+    owner_pid = _read_lock_owner_pid(paths)
+    if _is_pid_running(owner_pid):
+        assert owner_pid is not None
+        _write_pid_file(paths, owner_pid)
+        return True, owner_pid
+    return False, None
 
 
 def _resolve_stream_enabled() -> str:
@@ -277,13 +291,13 @@ def _resolve_stream_enabled() -> str:
     return "1"
 
 
-def _build_child_env() -> dict[str, str]:
-    default_lock_path = str((RUNTIME_DIR / "bot.lock"))
+def _build_child_env(paths: RuntimePaths) -> dict[str, str]:
     child_env = dict(os.environ)
     child_env.update(
         {
             "TELEGRAM_BOT_TOKEN": _env_or_default("TELEGRAM_BOT_TOKEN", ""),
             "ALLOWED_TELEGRAM_USER_IDS": _env_or_default("ALLOWED_TELEGRAM_USER_IDS", ""),
+            "ALLOWED_CWD_ROOTS": _env_or_default("ALLOWED_CWD_ROOTS", ""),
             "DEFAULT_CWD": _env_or_default("DEFAULT_CWD", str(REPO_ROOT)),
             "DEFAULT_PROVIDER": _env_or_default("DEFAULT_PROVIDER", "codex"),
             "CODEX_BIN": _env_or_default("CODEX_BIN", "codex"),
@@ -297,7 +311,7 @@ def _build_child_env() -> dict[str, str]:
             ),
             "CLAUDE_MODEL": _env_or_default("CLAUDE_MODEL", ""),
             "CLAUDE_PERMISSION_MODE": _env_or_default("CLAUDE_PERMISSION_MODE", "default"),
-            "STATE_PATH": str(STATE_PATH),
+            "STATE_PATH": str(paths.state_file),
             "TG_STREAM_ENABLED": _resolve_stream_enabled(),
             "TG_STREAM_EDIT_INTERVAL_MS": _env_or_default("TG_STREAM_EDIT_INTERVAL_MS", "700"),
             "TG_STREAM_MIN_DELTA_CHARS": _env_or_default("TG_STREAM_MIN_DELTA_CHARS", "8"),
@@ -305,7 +319,7 @@ def _build_child_env() -> dict[str, str]:
             "TG_HTTP_MAX_RETRIES": _env_or_default("TG_HTTP_MAX_RETRIES", "2"),
             "TG_HTTP_RETRY_BASE_MS": _env_or_default("TG_HTTP_RETRY_BASE_MS", "300"),
             "TG_HTTP_RETRY_MAX_MS": _env_or_default("TG_HTTP_RETRY_MAX_MS", "3000"),
-            "TG_INSTANCE_LOCK_PATH": _env_or_default("TG_INSTANCE_LOCK_PATH", default_lock_path),
+            "TG_INSTANCE_LOCK_PATH": str(paths.lock_base),
             "TG_STREAM_RETRY_COOLDOWN_MS": _env_or_default("TG_STREAM_RETRY_COOLDOWN_MS", "15000"),
             "TG_STREAM_MAX_CONSECUTIVE_PREVIEW_ERRORS": _env_or_default(
                 "TG_STREAM_MAX_CONSECUTIVE_PREVIEW_ERRORS",
@@ -318,23 +332,15 @@ def _build_child_env() -> dict[str, str]:
     legacy_stream = _env_value(os.environ, "TELEGRAM_ENABLE_DRAFT_STREAM")
     if legacy_stream is not None:
         child_env["TELEGRAM_ENABLE_DRAFT_STREAM"] = legacy_stream
-
     return child_env
 
 
-def _resolve_instance_lock_path(environ: MutableMapping[str, str]) -> Path:
-    raw = _env_value(environ, "TG_INSTANCE_LOCK_PATH")
-    if raw:
-        return Path(raw).expanduser()
-    return RUNTIME_DIR / "bot.lock"
-
-
-def _probe_instance_lock(environ: MutableMapping[str, str]) -> tuple[bool, str]:
+def _probe_instance_lock(environ: MutableMapping[str, str], paths: RuntimePaths) -> tuple[bool, str]:
     token = _env_value(environ, "TELEGRAM_BOT_TOKEN")
     if not token:
         return True, ""
 
-    lock = BotInstanceLock(_resolve_instance_lock_path(environ), token)
+    lock = BotInstanceLock(paths.lock_base, token)
     acquired, payload = lock.acquire()
     if acquired:
         lock.release()
@@ -366,13 +372,23 @@ def _wait_until_stopped(pid: int, timeout_sec: float = 5.0) -> bool:
     return not _pid_exists(pid)
 
 
-def _ensure_runtime_dir() -> None:
-    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+def _wait_for_ready(proc: subprocess.Popen[bytes], paths: RuntimePaths, timeout_sec: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout_sec
+    last_seen = 0
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            return False
+        if paths.log_file.is_file():
+            lines = _tail_last_lines(paths.log_file, lines=40)
+            if lines:
+                last_seen = len(lines)
+            if any(READY_MARKER in line for line in lines):
+                return True
+        time.sleep(0.2)
+    return False
 
 
 def start() -> int:
-    _ensure_runtime_dir()
-
     validate_tg_config()
     validate_shared_config()
 
@@ -383,50 +399,52 @@ def start() -> int:
         print("  ALLOWED_TELEGRAM_USER_IDS=123456789  # 可选，推荐")
         return 1
 
-    if not BOT_ENTRY.is_file():
-        raise CliError(f"启动入口不存在: {BOT_ENTRY}")
-
-    child_env = _build_child_env()
-    lock_ok, lock_msg = _probe_instance_lock(child_env)
+    paths = _require_runtime_paths()
+    paths.instance_dir.mkdir(parents=True, exist_ok=True)
+    child_env = _build_child_env(paths)
+    lock_ok, lock_msg = _probe_instance_lock(child_env, paths)
     if not lock_ok:
         print(f"[error] 检测到同 token 实例已运行，拒绝启动: {lock_msg}")
         print("[hint] 请先执行 uv run stop，或手动停止占用进程后重试。")
         return 1
 
-    running, pid = tg_is_running()
+    running, pid = tg_is_running(paths)
     if running and pid is not None:
         print(f"[info] Telegram 已运行，PID={pid}")
         return 0
 
     print("[info] 启动 Telegram 服务...")
-    with LOG_FILE.open("ab") as log_fp:
-        proc = subprocess.Popen(
-            [sys.executable, str(BOT_ENTRY)],
-            cwd=str(REPO_ROOT),
-            env=child_env,
-            stdin=subprocess.DEVNULL,
-            stdout=log_fp,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
+    proc = subprocess.Popen(
+        [sys.executable, "-m", BOT_MODULE],
+        cwd=str(REPO_ROOT),
+        env=child_env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
 
-    _write_pid_file(proc.pid)
-    time.sleep(1)
-
-    if proc.poll() is None:
+    _write_pid_file(paths, proc.pid)
+    if _wait_for_ready(proc, paths):
         print(f"[ok] Telegram 已启动，PID={proc.pid}")
-        print(f"[ok] Telegram 日志: {LOG_FILE}")
+        print(f"[ok] Telegram 日志: {paths.log_file}")
         return 0
 
-    _remove_pid_file()
+    if proc.poll() is not None:
+        _remove_pid_file(paths)
     print("[error] Telegram 启动失败，最近日志：")
-    for line in _tail_last_lines(LOG_FILE, lines=50):
+    for line in _tail_last_lines(paths.log_file, lines=50):
         print(line)
     return 1
 
 
 def stop() -> int:
-    running, pid = tg_is_running()
+    paths = _resolve_existing_runtime_paths()
+    if paths is None:
+        print("[info] Telegram 未运行")
+        return 0
+
+    running, pid = tg_is_running(paths)
     if not running or pid is None:
         print("[info] Telegram 未运行")
         return 0
@@ -447,29 +465,40 @@ def stop() -> int:
             raise CliError(f"无权限强制停止进程 PID={pid}: {exc}") from exc
         _wait_until_stopped(pid)
 
-    _remove_pid_file()
+    _remove_pid_file(paths)
     print(f"[ok] Telegram 已停止，PID={pid}")
     return 0
 
 
 def status() -> int:
-    running, pid = tg_is_running()
+    paths = _resolve_existing_runtime_paths()
+    if paths is None:
+        print("[info] Telegram 未运行")
+        return 0
+
+    running, pid = tg_is_running(paths)
     if running and pid is not None:
         print(f"[ok] Telegram 运行中，PID={pid}")
+        print(f"[ok] 运行目录: {paths.instance_dir}")
     else:
         print("[info] Telegram 未运行")
     return 0
 
 
 def logs() -> int:
-    _ensure_runtime_dir()
-    LOG_FILE.touch(exist_ok=True)
+    paths = _resolve_existing_runtime_paths()
+    if paths is None:
+        print("[info] 尚无日志")
+        return 0
 
-    for line in _tail_last_lines(LOG_FILE, lines=10):
+    paths.instance_dir.mkdir(parents=True, exist_ok=True)
+    paths.log_file.touch(exist_ok=True)
+
+    for line in _tail_last_lines(paths.log_file, lines=10):
         print(line)
 
     try:
-        with LOG_FILE.open("r", encoding="utf-8", errors="replace") as log_fp:
+        with paths.log_file.open("r", encoding="utf-8", errors="replace") as log_fp:
             log_fp.seek(0, os.SEEK_END)
             while True:
                 line = log_fp.readline()
@@ -493,7 +522,7 @@ def _bootstrap() -> None:
     normalize_proxy_env(os.environ)
 
 
-def _run(command) -> int:
+def _run(command: Callable[[], int]) -> int:
     try:
         _bootstrap()
         return int(command())
