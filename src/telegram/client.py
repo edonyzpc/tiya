@@ -244,16 +244,20 @@ class TelegramClient:
         message_id: int,
         text: str,
         fail_fast_retry_after: bool = False,
+        reply_markup: Optional[Any] = None,
         parse_mode: Optional[str] = None,
         entities: Optional[list[MessageEntity]] = None,
         disable_web_page_preview: Optional[bool] = None,
         link_preview_options: Optional[LinkPreviewOptions] = None,
     ) -> Message:
+        markup = self._normalize_markup(reply_markup)
+
         async def _call() -> Message:
             return await self.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=message_id,
                 text=text,
+                reply_markup=markup,
                 parse_mode=parse_mode,
                 entities=entities,
                 disable_web_page_preview=disable_web_page_preview,
@@ -262,6 +266,28 @@ class TelegramClient:
 
         return await self._call_with_retries(
             "editMessageText",
+            _call,
+            fail_fast_retry_after=fail_fast_retry_after,
+        )
+
+    async def edit_message_reply_markup(
+        self,
+        chat_id: int,
+        message_id: int,
+        reply_markup: Optional[Any] = None,
+        fail_fast_retry_after: bool = False,
+    ) -> Message:
+        markup = self._normalize_markup(reply_markup)
+
+        async def _call() -> Message:
+            return await self.bot.edit_message_reply_markup(
+                chat_id=chat_id,
+                message_id=message_id,
+                reply_markup=markup,
+            )
+
+        return await self._call_with_retries(
+            "editMessageReplyMarkup",
             _call,
             fail_fast_retry_after=fail_fast_retry_after,
         )
