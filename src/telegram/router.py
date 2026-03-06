@@ -1,12 +1,14 @@
 import os
 import shutil
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 from aiogram import Router
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, Document, InlineKeyboardButton, InlineKeyboardMarkup, Message, PhotoSize
 
-from ..domain.models import AgentProvider, StreamConfig
+from ..domain.models import AgentProvider, PendingImage, PromptImage, StreamConfig
 from ..logging_utils import log
 from ..services.runner_protocol import RunnerProtocol
 from ..services.session_store import AsyncSessionStoreProtocol, CodexSessionStore
@@ -28,6 +30,25 @@ BOT_COMMANDS: list[dict[str, str]] = [
     {"command": "ask", "description": "在当前会话提问"},
 ]
 
+MAX_TELEGRAM_IMAGE_BYTES = 20 * 1024 * 1024
+_IMAGE_DOCUMENT_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+_MIME_EXTENSION_OVERRIDES = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/bmp": ".bmp",
+}
+
+
+@dataclass(frozen=True)
+class IncomingImage:
+    file_id: str
+    file_unique_id: str
+    file_name: str
+    mime_type: Optional[str]
+    file_size: Optional[int]
+
 
 class TgCodexService:
     def __init__(
@@ -38,6 +59,7 @@ class TgCodexService:
         runners: dict[AgentProvider, RunnerProtocol],
         runner_bins: dict[AgentProvider, str],
         default_cwd: Path,
+        attachments_root: Path,
         allowed_user_ids: Optional[set[int]],
         allowed_cwd_roots: tuple[Path, ...],
         stream_config: StreamConfig,
@@ -49,6 +71,7 @@ class TgCodexService:
         self.runners = runners
         self.runner_bins = runner_bins
         self.default_cwd = default_cwd
+        self.attachments_root = attachments_root.expanduser()
         self.allowed_user_ids = allowed_user_ids
         self.allowed_cwd_roots = tuple(path.expanduser().resolve() for path in allowed_cwd_roots)
         self.stream_config = stream_config
@@ -97,16 +120,13 @@ class TgCodexService:
         await self.api.answer_callback_query(cq_id, text="不支持的操作。", show_alert=True)
 
     async def handle_message(self, msg: Message) -> None:
-        text = (msg.text or "").strip()
-        if not text:
-            return
-
         chat = msg.chat
         chat_id = chat.id
         chat_type = str(chat.type)
         message_id = msg.message_id
         user = msg.from_user
         user_id = getattr(user, "id", None)
+        text = (msg.text or "").strip()
 
         if user_id is None:
             return
@@ -118,8 +138,36 @@ class TgCodexService:
             return
 
         provider = await self.state.get_active_provider(int(user_id))
+        incoming_image = self._extract_incoming_image(msg)
+        if incoming_image is not None:
+            await self.state.set_pending_session_pick(int(user_id), False, provider=provider)
+            await self._handle_image_message(
+                chat_id=chat_id,
+                reply_to=message_id,
+                user_id=int(user_id),
+                provider=provider,
+                image=incoming_image,
+                caption=(msg.caption or "").strip(),
+                media_group_id=getattr(msg, "media_group_id", None),
+                chat_type=chat_type,
+            )
+            return
+
+        if isinstance(msg.document, Document):
+            await self.api.send_message(
+                chat_id,
+                "当前只支持图片文件作为上下文，请发送单张图片。",
+                reply_to=message_id,
+            )
+            return
+
+        if not text:
+            return
+
         if not text.startswith("/"):
             if await self._try_handle_quick_session_pick(chat_id, message_id, int(user_id), provider, text):
+                return
+            if await self._try_handle_pending_image_prompt(chat_id, message_id, int(user_id), provider, text, chat_type):
                 return
             await self.state.set_pending_session_pick(int(user_id), False, provider=provider)
             await self._handle_chat_message(chat_id, message_id, int(user_id), provider, text, chat_type)
@@ -150,6 +198,15 @@ class TgCodexService:
             await self._handle_history(chat_id, message_id, int(user_id), provider, arg)
             return
         if cmd == "ask":
+            if arg.strip() and await self._try_handle_pending_image_prompt(
+                chat_id,
+                message_id,
+                int(user_id),
+                provider,
+                arg,
+                chat_type,
+            ):
+                return
             await self._handle_ask(chat_id, message_id, int(user_id), provider, arg, chat_type)
             return
 
@@ -169,6 +226,206 @@ class TgCodexService:
         if len(parts) == 3 and parts[1] in ("codex", "claude"):
             return parts[1], parts[2]
         return await self.state.get_active_provider(user_id), data[4:]
+
+    @staticmethod
+    def _extract_incoming_image(msg: Message) -> Optional[IncomingImage]:
+        if msg.photo:
+            largest = max(
+                msg.photo,
+                key=lambda item: ((item.file_size or 0), item.width * item.height),
+            )
+            if not isinstance(largest, PhotoSize):
+                return None
+            return IncomingImage(
+                file_id=largest.file_id,
+                file_unique_id=largest.file_unique_id,
+                file_name=f"telegram-photo-{largest.file_unique_id}.jpg",
+                mime_type="image/jpeg",
+                file_size=largest.file_size,
+            )
+
+        document = msg.document
+        if not isinstance(document, Document):
+            return None
+        if not TgCodexService._is_supported_image_document(document):
+            return None
+        file_name = TgCodexService._document_file_name(document)
+        return IncomingImage(
+            file_id=document.file_id,
+            file_unique_id=document.file_unique_id,
+            file_name=file_name,
+            mime_type=document.mime_type,
+            file_size=document.file_size,
+        )
+
+    @staticmethod
+    def _is_supported_image_document(document: Document) -> bool:
+        mime_type = (document.mime_type or "").strip().lower()
+        if mime_type.startswith("image/"):
+            return True
+        suffix = Path(document.file_name or "").suffix.lower()
+        return suffix in _IMAGE_DOCUMENT_SUFFIXES
+
+    @staticmethod
+    def _document_file_name(document: Document) -> str:
+        original_name = Path(document.file_name or "").name.strip()
+        suffix = Path(original_name).suffix.lower()
+        if suffix not in _IMAGE_DOCUMENT_SUFFIXES:
+            suffix = _MIME_EXTENSION_OVERRIDES.get((document.mime_type or "").strip().lower(), ".img")
+        if original_name:
+            stem = Path(original_name).stem or f"telegram-document-{document.file_unique_id}"
+            return f"{stem}{suffix}"
+        return f"telegram-document-{document.file_unique_id}{suffix}"
+
+    def _attachment_path(self, chat_id: int, user_id: int, message_id: int, file_name: str) -> Path:
+        safe_name = Path(file_name).name or "attachment.img"
+        return self.attachments_root / f"user-{user_id}" / f"chat-{chat_id}" / f"msg-{message_id}" / safe_name
+
+    async def _download_prompt_image(
+        self,
+        chat_id: int,
+        user_id: int,
+        message_id: int,
+        image: IncomingImage,
+    ) -> PromptImage:
+        destination = self._attachment_path(chat_id, user_id, message_id, image.file_name)
+        await self.api.download_telegram_file(image.file_id, destination)
+        return PromptImage(
+            path=destination,
+            file_name=image.file_name,
+            mime_type=image.mime_type,
+            file_size=image.file_size,
+        )
+
+    async def _clear_pending_image_and_files(
+        self,
+        user_id: int,
+        provider: AgentProvider,
+    ) -> Optional[PendingImage]:
+        pending = await self.state.clear_pending_image(user_id, provider=provider)
+        if pending is not None:
+            self._delete_attachment_dir(pending.path.parent)
+        return pending
+
+    @staticmethod
+    def _delete_attachment_dir(path: Path) -> None:
+        try:
+            shutil.rmtree(path, ignore_errors=True)
+        except Exception:
+            pass
+
+    async def _try_handle_pending_image_prompt(
+        self,
+        chat_id: int,
+        reply_to: int,
+        user_id: int,
+        provider: AgentProvider,
+        text: str,
+        chat_type: str,
+    ) -> bool:
+        pending = await self.state.get_pending_image(user_id, provider=provider)
+        if pending is None:
+            return False
+
+        if not pending.path.is_file():
+            await self.state.clear_pending_image(user_id, provider=provider)
+            await self.api.send_message(
+                chat_id,
+                "之前缓存的图片已失效，请重新发送图片并附上说明。",
+                reply_to=reply_to,
+            )
+            return True
+
+        await self.state.clear_pending_image(user_id, provider=provider)
+        await self._run_prompt(
+            chat_id=chat_id,
+            reply_to=reply_to,
+            user_id=user_id,
+            provider=provider,
+            prompt=text,
+            chat_type=chat_type,
+            images=(pending.to_prompt_image(),),
+        )
+        return True
+
+    async def _handle_image_message(
+        self,
+        chat_id: int,
+        reply_to: int,
+        user_id: int,
+        provider: AgentProvider,
+        image: IncomingImage,
+        caption: str,
+        media_group_id: Optional[str],
+        chat_type: str,
+    ) -> None:
+        if media_group_id:
+            await self.api.send_message(
+                chat_id,
+                "暂不支持相册或媒体组，请单独发送一张图片。",
+                reply_to=reply_to,
+            )
+            return
+
+        if image.file_size is not None and image.file_size > MAX_TELEGRAM_IMAGE_BYTES:
+            await self.api.send_message(
+                chat_id,
+                "图片过大，当前仅支持不超过 20 MB 的单张图片。",
+                reply_to=reply_to,
+            )
+            return
+
+        try:
+            prompt_image = await self._download_prompt_image(chat_id, user_id, reply_to, image)
+        except Exception as exc:
+            log(
+                "[error] telegram image download failed "
+                f"(user_id={user_id}, provider={provider}, message_id={reply_to}, error={exc!r})"
+            )
+            await self.api.send_message(chat_id, f"图片下载失败: {exc}", reply_to=reply_to)
+            return
+        previous = await self._clear_pending_image_and_files(user_id, provider)
+        if previous is not None:
+            log(
+                "replaced pending image "
+                f"(user_id={user_id}, provider={provider}, old_message_id={previous.message_id})"
+            )
+        raw_caption = caption.strip()
+        prompt = raw_caption
+        if raw_caption == "/ask" or raw_caption.startswith("/ask "):
+            ask_prompt = raw_caption[4:].strip()
+            if not ask_prompt:
+                self._delete_attachment_dir(prompt_image.path.parent)
+                await self.api.send_message(chat_id, "请在 /ask 后补充你的要求。", reply_to=reply_to)
+                return
+            prompt = ask_prompt
+
+        if prompt:
+            await self._run_prompt(
+                chat_id=chat_id,
+                reply_to=reply_to,
+                user_id=user_id,
+                provider=provider,
+                prompt=prompt,
+                chat_type=chat_type,
+                images=(prompt_image,),
+            )
+            return
+
+        pending = PendingImage(
+            path=prompt_image.path,
+            file_name=prompt_image.file_name,
+            mime_type=prompt_image.mime_type,
+            file_size=prompt_image.file_size,
+            message_id=reply_to,
+            created_at=int(time.time()),
+        )
+        await self.state.set_pending_image(user_id, pending, provider=provider)
+        await self.api.send_message(
+            chat_id,
+            "已收到这张图片。请下一条发送文本，说明你希望我基于这张图做什么。",
+            reply_to=reply_to,
+        )
 
     async def _send_profiled_message(
         self,
@@ -215,6 +472,7 @@ class TgCodexService:
                 "",
                 "> 执行 `/sessions` 后，可直接发送编号或点击按钮切换会话。",
                 "> 直接发送普通消息即可续聊当前 session。",
+                "> 单独发送一张图片并写 caption，或先发图片再下一条补文本要求。",
             ]
         )
         await self._send_profiled_message(
@@ -557,6 +815,7 @@ class TgCodexService:
             return
 
         await self.state.clear_active_session(user_id, str(target_cwd), provider=provider)
+        await self._clear_pending_image_and_files(user_id, provider)
         await self.state.set_pending_session_pick(user_id, False, provider=provider)
         await self.api.send_message(
             chat_id,
@@ -583,80 +842,90 @@ class TgCodexService:
         provider: AgentProvider,
         prompt: str,
         chat_type: str,
+        images: tuple[PromptImage, ...] = (),
     ) -> None:
-        active_id, active_cwd = await self.state.get_active(user_id, provider=provider)
-        resolved_cwd = Path(active_cwd).expanduser() if active_cwd else self.default_cwd
-        cwd = resolved_cwd
-        if not resolved_cwd.exists() or not resolved_cwd.is_dir():
-            fallback = Path.cwd()
-            log(
-                "[warn] invalid run cwd, fallback to process cwd "
-                f"(provider={provider}, user_id={user_id}, resolved={resolved_cwd}, fallback={fallback})"
-            )
-            cwd = fallback
-        cwd = cwd.resolve()
-        if not self._is_allowed_cwd(cwd):
-            await self.api.send_message(chat_id, f"cwd 不在允许范围内: {cwd}", reply_to=reply_to)
-            return
-
-        mode = "继续当前会话" if active_id else "新建会话"
-        log(f"run prompt: user_id={user_id} provider={provider} mode={mode} cwd={cwd} session={active_id}")
-
-        use_stream = self.stream_config.enabled and chat_type == "private"
-        orchestrator = StreamOrchestrator(
-            api=self.api,
-            chat_id=chat_id,
-            reply_to=reply_to,
-            stream_enabled=use_stream,
-            stream_config=self.stream_config,
-            renderer=self.renderer,
-        )
-        await orchestrator.start()
-
-        typing = TypingStatus(self.api, chat_id)
-        typing.start()
-        runner = self.runners[provider]
-        provider_label = provider.capitalize()
         try:
-            result = await runner.run_prompt(
-                prompt=prompt,
-                cwd=cwd,
-                session_id=active_id,
-                on_partial=orchestrator.on_partial if use_stream else None,
-                on_reasoning=orchestrator.on_reasoning if use_stream else None,
-            )
-        except Exception as exc:
-            err_msg = f"调用 {provider_label} 时出现异常: {exc}"
-            log(
-                "[error] provider runner exception "
-                f"(provider={provider}, user_id={user_id}, cwd={cwd}, session={active_id}, error={exc!r})"
-            )
-            await orchestrator.finalize_error(err_msg, reply_to=reply_to)
-            log(orchestrator.summary_line(exit_code=-1))
-            return
-        finally:
-            await typing.stop()
-            await orchestrator.stop()
+            active_id, active_cwd = await self.state.get_active(user_id, provider=provider)
+            resolved_cwd = Path(active_cwd).expanduser() if active_cwd else self.default_cwd
+            cwd = resolved_cwd
+            if not resolved_cwd.exists() or not resolved_cwd.is_dir():
+                fallback = Path.cwd()
+                log(
+                    "[warn] invalid run cwd, fallback to process cwd "
+                    f"(provider={provider}, user_id={user_id}, resolved={resolved_cwd}, fallback={fallback})"
+                )
+                cwd = fallback
+            cwd = cwd.resolve()
+            if not self._is_allowed_cwd(cwd):
+                await self.api.send_message(chat_id, f"cwd 不在允许范围内: {cwd}", reply_to=reply_to)
+                return
 
-        if result.thread_id:
-            await self.state.set_active_session(user_id, result.thread_id, str(cwd), provider=provider)
-
-        if result.return_code != 0:
-            msg = f"{provider_label} 执行失败 (exit={result.return_code})\n{result.answer}"
-            if result.stderr_text:
-                msg += f"\n\nstderr:\n{result.stderr_text[-1200:]}"
+            mode = "继续当前会话" if active_id else "新建会话"
             log(
-                "[error] provider runner non-zero exit "
-                f"(provider={provider}, user_id={user_id}, cwd={cwd}, session={active_id}, "
-                f"exit={result.return_code}, answer_tail={result.answer[-400:]!r}, "
-                f"stderr_tail={result.stderr_text[-400:]!r})"
+                "run prompt: "
+                f"user_id={user_id} provider={provider} mode={mode} cwd={cwd} "
+                f"session={active_id} image_count={len(images)}"
             )
-            await orchestrator.finalize_error(msg, reply_to=reply_to)
+
+            use_stream = self.stream_config.enabled and chat_type == "private"
+            orchestrator = StreamOrchestrator(
+                api=self.api,
+                chat_id=chat_id,
+                reply_to=reply_to,
+                stream_enabled=use_stream,
+                stream_config=self.stream_config,
+                renderer=self.renderer,
+            )
+            await orchestrator.start()
+
+            typing = TypingStatus(self.api, chat_id)
+            typing.start()
+            runner = self.runners[provider]
+            provider_label = provider.capitalize()
+            try:
+                result = await runner.run_prompt(
+                    prompt=prompt,
+                    cwd=cwd,
+                    session_id=active_id,
+                    images=images,
+                    on_partial=orchestrator.on_partial if use_stream else None,
+                    on_reasoning=orchestrator.on_reasoning if use_stream else None,
+                )
+            except Exception as exc:
+                err_msg = f"调用 {provider_label} 时出现异常: {exc}"
+                log(
+                    "[error] provider runner exception "
+                    f"(provider={provider}, user_id={user_id}, cwd={cwd}, session={active_id}, error={exc!r})"
+                )
+                await orchestrator.finalize_error(err_msg, reply_to=reply_to)
+                log(orchestrator.summary_line(exit_code=-1))
+                return
+            finally:
+                await typing.stop()
+                await orchestrator.stop()
+
+            if result.thread_id:
+                await self.state.set_active_session(user_id, result.thread_id, str(cwd), provider=provider)
+
+            if result.return_code != 0:
+                msg = f"{provider_label} 执行失败 (exit={result.return_code})\n{result.answer}"
+                if result.stderr_text:
+                    msg += f"\n\nstderr:\n{result.stderr_text[-1200:]}"
+                log(
+                    "[error] provider runner non-zero exit "
+                    f"(provider={provider}, user_id={user_id}, cwd={cwd}, session={active_id}, "
+                    f"exit={result.return_code}, answer_tail={result.answer[-400:]!r}, "
+                    f"stderr_tail={result.stderr_text[-400:]!r})"
+                )
+                await orchestrator.finalize_error(msg, reply_to=reply_to)
+                log(orchestrator.summary_line(exit_code=result.return_code))
+                return
+
+            await orchestrator.finalize_success(result.answer, reply_to=reply_to)
             log(orchestrator.summary_line(exit_code=result.return_code))
-            return
-
-        await orchestrator.finalize_success(result.answer, reply_to=reply_to)
-        log(orchestrator.summary_line(exit_code=result.return_code))
+        finally:
+            for image in images:
+                self._delete_attachment_dir(image.path.parent)
 
     def _is_allowed_cwd(self, candidate: Path) -> bool:
         if not self.allowed_cwd_roots:

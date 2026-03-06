@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from src.domain.models import PendingImage
 from src.services.state_store import SCHEMA_VERSION, StateStore
 
 
@@ -17,6 +18,18 @@ async def test_state_store_provider_roundtrip(tmp_path: Path):
     await store.set_active_session(1001, "sid-x", "/work-x", provider="codex")
     await store.set_last_session_ids(1001, ["sid-c", "sid-c2"], provider="claude")
     await store.set_pending_session_pick(1001, True, provider="claude")
+    await store.set_pending_image(
+        1001,
+        PendingImage(
+            path=tmp_path / "pending.png",
+            file_name="pending.png",
+            mime_type="image/png",
+            file_size=123,
+            message_id=42,
+            created_at=1700000000,
+        ),
+        provider="claude",
+    )
     await store.close()
 
     store2 = StateStore(path, default_provider="codex")
@@ -25,6 +38,10 @@ async def test_state_store_provider_roundtrip(tmp_path: Path):
     assert await store2.get_active(1001, provider="codex") == ("sid-x", "/work-x")
     assert await store2.get_last_session_ids(1001, provider="claude") == ["sid-c", "sid-c2"]
     assert await store2.is_pending_session_pick(1001, provider="claude") is True
+    pending = await store2.get_pending_image(1001, provider="claude")
+    assert pending is not None
+    assert pending.file_name == "pending.png"
+    assert pending.message_id == 42
     await store2.close()
 
 
@@ -63,6 +80,40 @@ async def test_clear_active_session_is_provider_scoped(tmp_path: Path):
 
     assert await store.get_active(1, provider="codex") == ("sid-x", "/x")
     assert await store.get_active(1, provider="claude") == (None, "/new-y")
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_pending_image_is_provider_scoped_and_clear_returns_previous(tmp_path: Path):
+    path = tmp_path / "state.json"
+    store = StateStore(path, default_provider="codex", flush_delay_sec=0.01)
+    codex_image = PendingImage(
+        path=tmp_path / "codex.png",
+        file_name="codex.png",
+        mime_type="image/png",
+        file_size=100,
+        message_id=11,
+        created_at=1700000001,
+    )
+    claude_image = PendingImage(
+        path=tmp_path / "claude.png",
+        file_name="claude.png",
+        mime_type="image/png",
+        file_size=101,
+        message_id=12,
+        created_at=1700000002,
+    )
+    await store.set_pending_image(1, codex_image, provider="codex")
+    await store.set_pending_image(1, claude_image, provider="claude")
+
+    assert (await store.get_pending_image(1, provider="codex")) == codex_image
+    assert (await store.get_pending_image(1, provider="claude")) == claude_image
+
+    cleared = await store.clear_pending_image(1, provider="claude")
+
+    assert cleared == claude_image
+    assert await store.get_pending_image(1, provider="claude") is None
+    assert await store.get_pending_image(1, provider="codex") == codex_image
     await store.close()
 
 

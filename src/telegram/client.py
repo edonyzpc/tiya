@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 import time
 from typing import Any, Awaitable, Callable, Optional
 
@@ -321,6 +322,20 @@ class TelegramClient:
             )
 
         return bool(await self._call_with_retries("answerCallbackQuery", _call))
+
+    async def download_telegram_file(self, file_id: str, destination: Path) -> Path:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+
+        async def _get_file():
+            return await self.bot.get_file(file_id)
+
+        telegram_file = await self._call_with_retries("getFile", _get_file)
+
+        async def _download() -> None:
+            await self.bot.download_file(telegram_file.file_path, destination=destination)
+
+        await self._call_with_retries("downloadFile", _download)
+        return destination
 
 
 def monotonic_ms(started_at: float) -> int:

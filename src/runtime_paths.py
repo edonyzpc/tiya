@@ -47,6 +47,7 @@ class RuntimePaths:
     log_file: Path
     state_file: Path
     lock_base: Path
+    attachments_dir: Path
 
     @classmethod
     def for_token(cls, token: str, environ: Optional[Mapping[str, str]] = None) -> "RuntimePaths":
@@ -67,6 +68,7 @@ class RuntimePaths:
             log_file=instance_dir / "bot.log",
             state_file=instance_dir / "bot_state.json",
             lock_base=instance_dir / "bot.lock",
+            attachments_dir=instance_dir / "attachments",
         )
 
 

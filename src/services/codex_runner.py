@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
-from ..domain.models import AgentRunResult
+from ..domain.models import AgentRunResult, PromptImage
 
 
 MAX_CAPTURED_LINES = 200
@@ -45,6 +45,7 @@ class CodexRunner:
         prompt: str,
         cwd: Path,
         session_id: Optional[str] = None,
+        images: tuple[PromptImage, ...] = (),
         on_partial: Optional[Callable[[str], Awaitable[None]]] = None,
         on_reasoning: Optional[Callable[[str], Awaitable[None]]] = None,
     ) -> AgentRunResult:
@@ -59,6 +60,10 @@ class CodexRunner:
         if self.dangerous_bypass_level >= 2:
             exec_flags.append("--dangerously-bypass-approvals-and-sandbox")
 
+        image_flags: list[str] = []
+        for image in images:
+            image_flags.extend(["--image", str(image.path)])
+
         if session_id:
             cmd = [
                 self.codex_bin,
@@ -66,6 +71,7 @@ class CodexRunner:
                 "resume",
                 *config_flags,
                 *exec_flags,
+                *image_flags,
                 session_id,
                 prompt,
             ]
@@ -75,6 +81,7 @@ class CodexRunner:
                 "exec",
                 *config_flags,
                 *exec_flags,
+                *image_flags,
                 prompt,
             ]
 

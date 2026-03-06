@@ -4,9 +4,9 @@ import json
 from pathlib import Path
 from typing import Any, Optional, cast
 
-from ..domain.models import AgentProvider
+from ..domain.models import AgentProvider, PendingImage
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _PROVIDERS: tuple[AgentProvider, AgentProvider] = ("codex", "claude")
 
 
@@ -101,6 +101,11 @@ class StateStore:
                 bucket["pending_session_pick"] = normalized_pending
                 changed = True
 
+            normalized_pending_image = self._normalize_pending_image(bucket.get("pending_image"))
+            if normalized_pending_image != bucket.get("pending_image"):
+                bucket["pending_image"] = normalized_pending_image
+                changed = True
+
         legacy_active_session = user_data.pop("active_session_id", None)
         legacy_active_cwd = user_data.pop("active_cwd", None)
         legacy_last_session_ids = user_data.pop("last_session_ids", None)
@@ -140,7 +145,54 @@ class StateStore:
             "active_cwd": None,
             "last_session_ids": [],
             "pending_session_pick": False,
+            "pending_image": None,
         }
+
+    @staticmethod
+    def _normalize_pending_image(value: Any) -> Optional[dict[str, Any]]:
+        if not isinstance(value, dict):
+            return None
+
+        path_value = value.get("path")
+        file_name = value.get("file_name")
+        message_id = value.get("message_id")
+        created_at = value.get("created_at")
+        if not isinstance(path_value, str) or not path_value.strip():
+            return None
+        if not isinstance(file_name, str) or not file_name.strip():
+            return None
+        if not isinstance(message_id, int):
+            return None
+        if not isinstance(created_at, int):
+            return None
+
+        mime_type = value.get("mime_type")
+        if mime_type is not None and not isinstance(mime_type, str):
+            mime_type = None
+
+        file_size = value.get("file_size")
+        if file_size is not None and not isinstance(file_size, int):
+            file_size = None
+
+        return {
+            "path": path_value,
+            "file_name": file_name,
+            "mime_type": mime_type,
+            "file_size": file_size,
+            "message_id": message_id,
+            "created_at": created_at,
+        }
+
+    @staticmethod
+    def _pending_image_from_dict(payload: dict[str, Any]) -> PendingImage:
+        return PendingImage(
+            path=Path(str(payload["path"])),
+            file_name=str(payload["file_name"]),
+            mime_type=cast(Optional[str], payload.get("mime_type")),
+            file_size=cast(Optional[int], payload.get("file_size")),
+            message_id=int(payload["message_id"]),
+            created_at=int(payload["created_at"]),
+        )
 
     def _atomic_write(self, payload: dict[str, Any]) -> None:
         tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
@@ -312,3 +364,59 @@ class StateStore:
             resolved_provider = self._resolve_provider_unlocked(user_id, provider)
             bucket = self._provider_bucket(user_data, resolved_provider)
             return bool(bucket.get("pending_session_pick"))
+
+    async def set_pending_image(
+        self,
+        user_id: int,
+        image: PendingImage,
+        provider: Optional[AgentProvider] = None,
+    ) -> None:
+        async with self._lock:
+            user_data = self._get_user_unlocked(user_id)
+            resolved_provider = self._resolve_provider_unlocked(user_id, provider)
+            bucket = self._provider_bucket(user_data, resolved_provider)
+            bucket["pending_image"] = {
+                "path": str(image.path),
+                "file_name": image.file_name,
+                "mime_type": image.mime_type,
+                "file_size": image.file_size,
+                "message_id": image.message_id,
+                "created_at": image.created_at,
+            }
+            self._mark_dirty_unlocked()
+
+    async def get_pending_image(
+        self,
+        user_id: int,
+        provider: Optional[AgentProvider] = None,
+    ) -> Optional[PendingImage]:
+        async with self._lock:
+            user_data = self._get_user_unlocked(user_id)
+            resolved_provider = self._resolve_provider_unlocked(user_id, provider)
+            bucket = self._provider_bucket(user_data, resolved_provider)
+            payload = bucket.get("pending_image")
+            if not isinstance(payload, dict):
+                return None
+            normalized = self._normalize_pending_image(payload)
+            if normalized is None:
+                return None
+            return self._pending_image_from_dict(normalized)
+
+    async def clear_pending_image(
+        self,
+        user_id: int,
+        provider: Optional[AgentProvider] = None,
+    ) -> Optional[PendingImage]:
+        async with self._lock:
+            user_data = self._get_user_unlocked(user_id)
+            resolved_provider = self._resolve_provider_unlocked(user_id, provider)
+            bucket = self._provider_bucket(user_data, resolved_provider)
+            payload = bucket.get("pending_image")
+            bucket["pending_image"] = None
+            self._mark_dirty_unlocked()
+            if not isinstance(payload, dict):
+                return None
+            normalized = self._normalize_pending_image(payload)
+            if normalized is None:
+                return None
+            return self._pending_image_from_dict(normalized)

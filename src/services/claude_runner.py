@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
-from ..domain.models import AgentRunResult
+from ..domain.models import AgentRunResult, PromptImage
 
 
 MAX_CAPTURED_LINES = 200
@@ -38,6 +38,7 @@ class ClaudeRunner:
         prompt: str,
         cwd: Path,
         session_id: Optional[str] = None,
+        images: tuple[PromptImage, ...] = (),
         on_partial: Optional[Callable[[str], Awaitable[None]]] = None,
         on_reasoning: Optional[Callable[[str], Awaitable[None]]] = None,
     ) -> AgentRunResult:
@@ -53,9 +54,11 @@ class ClaudeRunner:
             cmd.extend(["--model", self.model])
         if self.permission_mode:
             cmd.extend(["--permission-mode", self.permission_mode])
+        for attachment_root in self._image_attachment_roots(images):
+            cmd.extend(["--add-dir", str(attachment_root)])
         if session_id:
             cmd.extend(["-r", session_id])
-        cmd.append(prompt)
+        cmd.append(self._augment_prompt_with_images(prompt, images))
 
         stdout_lines: deque[str] = deque(maxlen=MAX_CAPTURED_LINES)
         stderr_lines: deque[str] = deque(maxlen=MAX_CAPTURED_LINES)
@@ -206,6 +209,24 @@ class ClaudeRunner:
             stderr_text=stderr_text,
             return_code=return_code,
         )
+
+    @staticmethod
+    def _image_attachment_roots(images: tuple[PromptImage, ...]) -> tuple[Path, ...]:
+        roots: list[Path] = []
+        for image in images:
+            parent = image.path.parent
+            if parent not in roots:
+                roots.append(parent)
+        return tuple(roots)
+
+    @staticmethod
+    def _augment_prompt_with_images(prompt: str, images: tuple[PromptImage, ...]) -> str:
+        if not images:
+            return prompt
+        lines = [prompt.strip(), "", "请结合以下本地图片完成上面的要求："]
+        for image in images:
+            lines.append(f"- {image.path}")
+        return "\n".join(line for line in lines if line is not None).strip()
 
     @staticmethod
     def _extract_message_text(content: Any) -> str:

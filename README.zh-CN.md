@@ -10,6 +10,7 @@
 - 仅支持长轮询（不含 webhook）
 - 通过 `/provider codex|claude` 运行时切换 provider
 - 两个 provider 都支持会话列表/切换/历史
+- 支持单张图片作为上下文输入：可直接写 caption，或先发图再下一条补文本要求
 - 私聊流式回退链：
   - `sendMessageDraft`
   - `editMessageText`
@@ -149,6 +150,7 @@ uv run restart
 - `/status`
 - `/ask <text>`
 - 直接发送文本即可对话
+- 可发送单张图片：有 caption 时立即处理；无 caption 时会等待下一条文本要求
 
 ## 目录结构
 

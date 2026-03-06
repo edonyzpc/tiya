@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from src.domain.models import PromptImage
 from src.services.claude_runner import ClaudeRunner
 
 
@@ -137,3 +138,33 @@ async def test_run_prompt_handles_missing_cwd(monkeypatch, tmp_path: Path):
 
     assert result.return_code == 127
     assert "工作目录不存在或不可访问: tiya" in result.answer
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_with_images_adds_attachment_dir_and_prompt_context(monkeypatch, tmp_path: Path):
+    captured_args: list[str] = []
+    image_path = tmp_path / "attachments" / "image.png"
+    proc = _FakeProcess(
+        stdout_lines=['{"type":"result","session_id":"sid-3","result":"ok"}'],
+        stderr_lines=[],
+        return_code=0,
+    )
+
+    async def _fake_create(*args, **kwargs):
+        captured_args[:] = [str(value) for value in args]
+        return proc
+
+    monkeypatch.setattr("src.services.claude_runner.asyncio.create_subprocess_exec", _fake_create)
+
+    runner = ClaudeRunner(claude_bin="claude")
+    await runner.run_prompt(
+        "describe this image",
+        tmp_path,
+        images=(PromptImage(path=image_path, file_name="image.png", mime_type="image/png", file_size=123),),
+    )
+
+    assert "--add-dir" in captured_args
+    idx = captured_args.index("--add-dir")
+    assert captured_args[idx + 1] == str(image_path.parent)
+    assert captured_args[-1].startswith("describe this image")
+    assert str(image_path) in captured_args[-1]

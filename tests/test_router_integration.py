@@ -22,6 +22,8 @@ class FakeTelegramClient:
         self.edit_message_text_calls = []
         self.delete_message_calls = []
         self.answer_callback_query_calls = []
+        self.download_telegram_file_calls = []
+        self.file_payloads = {}
 
     async def send_message(
         self,
@@ -183,6 +185,12 @@ class FakeTelegramClient:
         )
         return True
 
+    async def download_telegram_file(self, file_id, destination):
+        self.download_telegram_file_calls.append({"file_id": file_id, "destination": destination})
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(self.file_payloads.get(file_id, b"fake-image"))
+        return destination
+
 
 class FakeRunner:
     def __init__(self, name: str):
@@ -195,12 +203,13 @@ class FakeRunner:
             return_code=0,
         )
 
-    async def run_prompt(self, prompt, cwd, session_id=None, on_partial=None, on_reasoning=None):
+    async def run_prompt(self, prompt, cwd, session_id=None, images=(), on_partial=None, on_reasoning=None):
         self.calls.append(
             {
                 "prompt": prompt,
                 "cwd": str(cwd),
                 "session_id": session_id,
+                "images": list(images),
             }
         )
         if on_reasoning is not None:
@@ -325,6 +334,7 @@ def _build_service(
             "claude": "claude",
         },
         default_cwd=tmp_path,
+        attachments_root=tmp_path / "attachments",
         allowed_user_ids=allowed_user_ids,
         allowed_cwd_roots=allowed_cwd_roots,
         stream_config=StreamConfig(
@@ -345,17 +355,77 @@ async def _feed(dp: Dispatcher, bot: Bot, update: dict):
     await dp.feed_raw_update(bot, update)
 
 
-def _message_update(update_id: int, text: str, user_id: int = 1, message_id: int = 11) -> dict:
+def _message_update(update_id: int, text: str, user_id: int = 1, message_id: int = 11, chat_id: int = 101) -> dict:
     return {
         "update_id": update_id,
         "message": {
             "message_id": message_id,
             "date": 1,
-            "chat": {"id": 101, "type": "private"},
+            "chat": {"id": chat_id, "type": "private"},
             "from": {"id": user_id, "is_bot": False, "first_name": "u"},
             "text": text,
         },
     }
+
+
+def _photo_message_update(
+    update_id: int,
+    *,
+    caption: str | None = None,
+    user_id: int = 1,
+    message_id: int = 11,
+    chat_id: int = 101,
+    media_group_id: str | None = None,
+    file_id: str = "photo-file-1",
+    file_unique_id: str = "photo-uniq-1",
+    file_size: int = 1024,
+) -> dict:
+    message = {
+        "message_id": message_id,
+        "date": 1,
+        "chat": {"id": chat_id, "type": "private"},
+        "from": {"id": user_id, "is_bot": False, "first_name": "u"},
+        "photo": [
+            {"file_id": "photo-small", "file_unique_id": "photo-small-uniq", "width": 10, "height": 10, "file_size": 100},
+            {"file_id": file_id, "file_unique_id": file_unique_id, "width": 100, "height": 100, "file_size": file_size},
+        ],
+    }
+    if caption is not None:
+        message["caption"] = caption
+    if media_group_id is not None:
+        message["media_group_id"] = media_group_id
+    return {"update_id": update_id, "message": message}
+
+
+def _document_message_update(
+    update_id: int,
+    *,
+    caption: str | None = None,
+    user_id: int = 1,
+    message_id: int = 11,
+    chat_id: int = 101,
+    file_id: str = "doc-file-1",
+    file_unique_id: str = "doc-uniq-1",
+    file_name: str = "image.png",
+    mime_type: str = "image/png",
+    file_size: int = 1024,
+) -> dict:
+    message = {
+        "message_id": message_id,
+        "date": 1,
+        "chat": {"id": chat_id, "type": "private"},
+        "from": {"id": user_id, "is_bot": False, "first_name": "u"},
+        "document": {
+            "file_id": file_id,
+            "file_unique_id": file_unique_id,
+            "file_name": file_name,
+            "mime_type": mime_type,
+            "file_size": file_size,
+        },
+    }
+    if caption is not None:
+        message["caption"] = caption
+    return {"update_id": update_id, "message": message}
 
 
 @pytest.mark.asyncio
@@ -483,6 +553,176 @@ async def test_status_and_history_use_rendered_entities(bot: Bot, tmp_path: Path
     assert history_msg["parse_mode"] is None
     assert status_msg["entities"]
     assert history_msg["entities"]
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_photo_with_caption_runs_runner_with_prompt_image(
+    bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]
+):
+    service, api, _, codex_runner, _ = _build_service(tmp_path, session_roots)
+    dp = Dispatcher()
+    dp.include_router(build_router(service))
+
+    await _feed(dp, bot, _photo_message_update(1, caption="summarize this screenshot", message_id=41))
+
+    assert len(codex_runner.calls) == 1
+    call = codex_runner.calls[-1]
+    assert call["prompt"] == "summarize this screenshot"
+    assert len(call["images"]) == 1
+    assert call["images"][0].file_name.endswith(".jpg")
+    assert api.download_telegram_file_calls
+    assert not (tmp_path / "attachments" / "user-1" / "chat-101" / "msg-41").exists()
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_photo_without_caption_waits_for_next_text_and_clears_pending(
+    bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]
+):
+    service, api, state, codex_runner, _ = _build_service(tmp_path, session_roots)
+    dp = Dispatcher()
+    dp.include_router(build_router(service))
+
+    await _feed(dp, bot, _photo_message_update(1, message_id=51))
+
+    assert codex_runner.calls == []
+    pending = await state.get_pending_image(1, provider="codex")
+    assert pending is not None
+    assert pending.path.exists()
+    assert "下一条发送文本" in api.send_message_calls[-1]["text"]
+
+    await _feed(dp, bot, _message_update(2, "extract the key numbers", message_id=52))
+
+    assert len(codex_runner.calls) == 1
+    call = codex_runner.calls[-1]
+    assert call["prompt"] == "extract the key numbers"
+    assert len(call["images"]) == 1
+    assert await state.get_pending_image(1, provider="codex") is None
+    assert not pending.path.parent.exists()
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_ask_command_consumes_pending_image(
+    bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]
+):
+    service, _, state, codex_runner, _ = _build_service(tmp_path, session_roots)
+    dp = Dispatcher()
+    dp.include_router(build_router(service))
+
+    await _feed(dp, bot, _photo_message_update(1, message_id=53))
+    assert await state.get_pending_image(1, provider="codex") is not None
+
+    await _feed(dp, bot, _message_update(2, "/ask identify the creature", message_id=54))
+
+    assert len(codex_runner.calls) == 1
+    assert codex_runner.calls[-1]["prompt"] == "identify the creature"
+    assert len(codex_runner.calls[-1]["images"]) == 1
+    assert await state.get_pending_image(1, provider="codex") is None
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_quick_session_pick_runs_before_pending_image_prompt(
+    bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]
+):
+    service, api, state, codex_runner, _ = _build_service(tmp_path, session_roots)
+    dp = Dispatcher()
+    dp.include_router(build_router(service))
+
+    await _feed(dp, bot, _photo_message_update(1, message_id=55))
+    await _feed(dp, bot, _message_update(2, "/sessions 1", message_id=56))
+    await _feed(dp, bot, _message_update(3, "1", message_id=57))
+
+    assert codex_runner.calls == []
+    assert (await state.get_active(1, provider="codex"))[0] == "session-1"
+    assert await state.get_pending_image(1, provider="codex") is not None
+    assert "已切换到 (codex)" in api.send_message_calls[-1]["text"]
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_pending_image_is_provider_scoped_and_new_clears_active_provider_pending(
+    bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]
+):
+    service, _, state, codex_runner, claude_runner = _build_service(tmp_path, session_roots)
+    dp = Dispatcher()
+    dp.include_router(build_router(service))
+
+    await _feed(dp, bot, _photo_message_update(1, message_id=61))
+    await _feed(dp, bot, _message_update(2, "/provider claude", message_id=62))
+    await _feed(dp, bot, _photo_message_update(3, message_id=63))
+
+    codex_pending = await state.get_pending_image(1, provider="codex")
+    claude_pending = await state.get_pending_image(1, provider="claude")
+    assert codex_pending is not None
+    assert claude_pending is not None
+
+    await _feed(dp, bot, _message_update(4, "/new", message_id=64))
+
+    assert await state.get_pending_image(1, provider="claude") is None
+    assert await state.get_pending_image(1, provider="codex") is not None
+    assert claude_runner.calls == []
+
+    await _feed(dp, bot, _message_update(5, "/provider codex", message_id=65))
+    await _feed(dp, bot, _message_update(6, "describe the diagram", message_id=66))
+
+    assert len(codex_runner.calls) == 1
+    assert codex_runner.calls[-1]["prompt"] == "describe the diagram"
+    assert len(codex_runner.calls[-1]["images"]) == 1
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_attachment_paths_are_scoped_by_chat_id(
+    bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]
+):
+    service, _, state, _, _ = _build_service(tmp_path, session_roots)
+    dp = Dispatcher()
+    dp.include_router(build_router(service))
+
+    await _feed(dp, bot, _photo_message_update(1, message_id=11, chat_id=101))
+    first_pending = await state.get_pending_image(1, provider="codex")
+    assert first_pending is not None
+
+    await _feed(dp, bot, _photo_message_update(2, message_id=11, chat_id=202))
+    second_pending = await state.get_pending_image(1, provider="codex")
+    assert second_pending is not None
+
+    assert first_pending.path != second_pending.path
+    assert "chat-101" in str(first_pending.path)
+    assert "chat-202" in str(second_pending.path)
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_invalid_image_inputs_are_rejected(bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]):
+    service, api, _, codex_runner, _ = _build_service(tmp_path, session_roots)
+    dp = Dispatcher()
+    dp.include_router(build_router(service))
+
+    await _feed(dp, bot, _photo_message_update(1, message_id=71, media_group_id="group-1"))
+    await _feed(
+        dp,
+        bot,
+        _document_message_update(
+            2,
+            message_id=72,
+            file_name="notes.txt",
+            mime_type="text/plain",
+        ),
+    )
+    await _feed(
+        dp,
+        bot,
+        _photo_message_update(3, message_id=73, file_size=21 * 1024 * 1024),
+    )
+
+    assert codex_runner.calls == []
+    assert "暂不支持相册" in api.send_message_calls[-3]["text"]
+    assert "只支持图片文件" in api.send_message_calls[-2]["text"]
+    assert "不超过 20 MB" in api.send_message_calls[-1]["text"]
     await service.shutdown()
 
 

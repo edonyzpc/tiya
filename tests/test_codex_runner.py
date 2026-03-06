@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from src.domain.models import PromptImage
 from src.services.codex_runner import CodexRunner
 
 
@@ -167,3 +168,34 @@ async def test_run_prompt_stderr_timeout_does_not_hang(monkeypatch, tmp_path: Pa
 
     assert result.return_code == 0
     assert result.answer == "done"
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_passes_image_flags_for_new_and_resumed_sessions(monkeypatch, tmp_path: Path):
+    proc = _FakeProcess(
+        stdout_lines=['{"type":"thread.started","thread_id":"thread-2"}', '{"type":"item.completed","item":{"id":"a","type":"agent_message","text":"done"}}'],
+        stderr_lines=[],
+        return_code=0,
+    )
+    captured_calls: list[list[str]] = []
+    image_path = tmp_path / "test.png"
+    image = PromptImage(path=image_path, file_name="test.png", mime_type="image/png", file_size=12)
+
+    async def _fake_create(*args, **kwargs):
+        captured_calls.append([str(value) for value in args])
+        return proc
+
+    monkeypatch.setattr("src.services.codex_runner.asyncio.create_subprocess_exec", _fake_create)
+
+    runner = CodexRunner(codex_bin="codex")
+    await runner.run_prompt("inspect", tmp_path, images=(image,))
+    await runner.run_prompt("inspect again", tmp_path, session_id="sid-1", images=(image,))
+
+    assert "--image" in captured_calls[0]
+    assert str(image_path) in captured_calls[0]
+    assert captured_calls[0][-1] == "inspect"
+    assert "resume" in captured_calls[1]
+    assert "--image" in captured_calls[1]
+    assert str(image_path) in captured_calls[1]
+    assert captured_calls[1][-2] == "sid-1"
+    assert captured_calls[1][-1] == "inspect again"

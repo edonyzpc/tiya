@@ -100,6 +100,13 @@ Use:
 /provider codex
 ```
 
+Images are supported as context input:
+
+```text
+[send one image with a caption]
+[send one image, then send a text instruction in the next message]
+```
+
 ## 6) Stop / restart
 
 ```bash

@@ -27,6 +27,32 @@ class AgentRunResult:
     return_code: int
 
 
+@dataclass(frozen=True)
+class PromptImage:
+    path: Path
+    file_name: str
+    mime_type: Optional[str]
+    file_size: Optional[int]
+
+
+@dataclass(frozen=True)
+class PendingImage:
+    path: Path
+    file_name: str
+    mime_type: Optional[str]
+    file_size: Optional[int]
+    message_id: int
+    created_at: int
+
+    def to_prompt_image(self) -> PromptImage:
+        return PromptImage(
+            path=self.path,
+            file_name=self.file_name,
+            mime_type=self.mime_type,
+            file_size=self.file_size,
+        )
+
+
 # Backward-compatible alias for existing imports.
 CodexRunResult = AgentRunResult
 

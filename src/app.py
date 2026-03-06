@@ -149,6 +149,7 @@ async def run() -> None:
         runners=runners,
         runner_bins=runner_bins,
         default_cwd=config.default_cwd,
+        attachments_root=RuntimePaths.for_token(config.telegram_token).attachments_dir,
         allowed_user_ids=config.allowed_user_ids,
         allowed_cwd_roots=config.allowed_cwd_roots,
         stream_config=stream_config,
