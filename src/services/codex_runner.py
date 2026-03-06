@@ -1,11 +1,14 @@
 import asyncio
+from collections import deque
 import json
 import re
-import subprocess
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
-from domain.models import AgentRunResult
+from ..domain.models import AgentRunResult
+
+
+MAX_CAPTURED_LINES = 200
 
 
 class CodexRunner:
@@ -75,8 +78,8 @@ class CodexRunner:
                 prompt,
             ]
 
-        stdout_lines: list[str] = []
-        stderr_lines: list[str] = []
+        stdout_lines: deque[str] = deque(maxlen=MAX_CAPTURED_LINES)
+        stderr_lines: deque[str] = deque(maxlen=MAX_CAPTURED_LINES)
         thread_id: Optional[str] = None
         agent_items: dict[str, str] = {}
         agent_order: list[str] = []
@@ -150,7 +153,14 @@ class CodexRunner:
                             pass
 
         return_code = await proc.wait()
-        await stderr_task
+        try:
+            await asyncio.wait_for(stderr_task, timeout=5.0)
+        except asyncio.TimeoutError:
+            stderr_task.cancel()
+            try:
+                await stderr_task
+            except asyncio.CancelledError:
+                pass
 
         stdout_text = "\n".join(stdout_lines)
         stderr_text = "\n".join(stderr_lines).strip()

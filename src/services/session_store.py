@@ -1,9 +1,10 @@
+import asyncio
 import json
 from pathlib import Path
 from typing import Optional, Protocol
 from uuid import UUID
 
-from domain.models import SessionMeta
+from ..domain.models import SessionMeta
 
 
 class SessionStoreProtocol(Protocol):
@@ -15,6 +16,35 @@ class SessionStoreProtocol(Protocol):
 
     def get_history(self, session_id: str, limit: int = 10) -> tuple[Optional[SessionMeta], list[tuple[str, str]]]:
         ...
+
+
+class AsyncSessionStoreProtocol(Protocol):
+    async def list_recent(self, limit: int = 10) -> list[SessionMeta]:
+        ...
+
+    async def find_by_id(self, session_id: str) -> Optional[SessionMeta]:
+        ...
+
+    async def get_history(self, session_id: str, limit: int = 10) -> tuple[Optional[SessionMeta], list[tuple[str, str]]]:
+        ...
+
+
+class AsyncSessionStore:
+    def __init__(self, inner: SessionStoreProtocol):
+        self.inner = inner
+
+    async def list_recent(self, limit: int = 10) -> list[SessionMeta]:
+        return await asyncio.to_thread(self.inner.list_recent, limit)
+
+    async def find_by_id(self, session_id: str) -> Optional[SessionMeta]:
+        return await asyncio.to_thread(self.inner.find_by_id, session_id)
+
+    async def get_history(
+        self,
+        session_id: str,
+        limit: int = 10,
+    ) -> tuple[Optional[SessionMeta], list[tuple[str, str]]]:
+        return await asyncio.to_thread(self.inner.get_history, session_id, limit)
 
 
 class CodexSessionStore:

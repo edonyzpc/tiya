@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Awaitable, Callable, Optional, Protocol
 
-from domain.models import AgentRunResult
+from ..domain.models import AgentRunResult
 
 
 class RunnerProtocol(Protocol):

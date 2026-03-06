@@ -2,10 +2,10 @@ import asyncio
 import time
 from typing import Optional
 
-from domain.models import StreamSummary
-from logging_utils import log
-from telegram.client import MAX_TELEGRAM_TEXT, TelegramClient
-from telegram.rendering import RenderProfile, TelegramMessageRenderer
+from ..domain.models import StreamConfig, StreamSummary
+from ..logging_utils import log
+from .client import MAX_TELEGRAM_TEXT, TelegramClient
+from .rendering import RenderProfile, TelegramMessageRenderer
 
 
 class TypingStatus:
@@ -234,6 +234,9 @@ class EditFallbackStream:
             return False
 
 
+PreviewStream = DraftStream | EditFallbackStream
+
+
 class StreamOrchestrator:
     def __init__(
         self,
@@ -241,24 +244,20 @@ class StreamOrchestrator:
         chat_id: int,
         reply_to: int,
         stream_enabled: bool,
-        stream_edit_interval_ms: int,
-        stream_min_delta_chars: int,
-        thinking_status_interval_ms: int,
-        retry_cooldown_ms: int = 15000,
-        max_consecutive_preview_errors: int = 2,
-        preview_failfast: bool = True,
+        stream_config: StreamConfig,
         renderer: Optional[TelegramMessageRenderer] = None,
     ):
         self.api = api
         self.chat_id = chat_id
         self.reply_to = reply_to
         self.stream_enabled = stream_enabled
-        self.stream_edit_interval_ms = max(200, stream_edit_interval_ms)
-        self.stream_min_delta_chars = max(1, stream_min_delta_chars)
-        self.thinking_status_interval_ms = max(400, thinking_status_interval_ms)
-        self.retry_cooldown_ms = max(0, retry_cooldown_ms)
-        self.max_consecutive_preview_errors = max(1, max_consecutive_preview_errors)
-        self.preview_failfast = bool(preview_failfast)
+        self.stream_config = stream_config
+        self.stream_edit_interval_ms = max(200, stream_config.edit_interval_ms)
+        self.stream_min_delta_chars = max(1, stream_config.min_delta_chars)
+        self.thinking_status_interval_ms = max(400, stream_config.thinking_status_interval_ms)
+        self.retry_cooldown_ms = max(0, stream_config.retry_cooldown_ms)
+        self.max_consecutive_preview_errors = max(1, stream_config.max_consecutive_preview_errors)
+        self.preview_failfast = bool(stream_config.preview_failfast)
         self.renderer = renderer
 
         self.stream_mode = "typing_only" if stream_enabled else "disabled"
@@ -277,8 +276,7 @@ class StreamOrchestrator:
         self._thinking_stop = asyncio.Event()
         self._first_output = asyncio.Event()
         self._thinking_task: Optional[asyncio.Task[None]] = None
-        self._stream_lock = asyncio.Lock()
-        self._stream: Optional[object] = None
+        self._stream: Optional[PreviewStream] = None
         self._fallback_placeholder_id: Optional[int] = None
         self._reasoning_hint: Optional[str] = None
 
@@ -292,6 +290,7 @@ class StreamOrchestrator:
         self._preview_cooldown_until = 0.0
         self._base_preview_interval_sec = self.stream_edit_interval_ms / 1000.0
         self._adaptive_preview_interval_sec = self._base_preview_interval_sec
+        self._last_partial_text = ""
         self._thinking_animation_interval_sec = max(
             0.04,
             min(
@@ -343,10 +342,18 @@ class StreamOrchestrator:
         raw = (text or "").strip()
         if not raw:
             return
+        previous_raw = self._last_partial_text
+        self._last_partial_text = raw
         if self.first_token_ms < 0:
             self.first_token_ms = int((time.monotonic() - self._started_at) * 1000)
         self._first_output.set()
         self.state = "STREAMING"
+        if previous_raw:
+            if raw.startswith(previous_raw):
+                if len(raw) - len(previous_raw) < self.stream_min_delta_chars:
+                    return
+            elif raw == previous_raw:
+                return
         preview = self._stream_preview_text(raw)
         self._enqueue_preview_text(preview)
 
@@ -507,7 +514,7 @@ class StreamOrchestrator:
             if stream is None:
                 continue
 
-            ok = bool(await getattr(stream, "push")(text))
+            ok = bool(await stream.push(text))
             self._collect_push_stats(stream)
             if ok:
                 self._consecutive_preview_errors = 0
@@ -528,17 +535,15 @@ class StreamOrchestrator:
             await self._on_preview_error(stream, "runtime")
             self._preview_dirty = self._stream is not None
 
-    def _collect_push_stats(self, stream: object) -> None:
-        state = getattr(stream, "last_push_state", "")
+    def _collect_push_stats(self, stream: PreviewStream) -> None:
+        state = stream.last_push_state
         if state == "sent":
             self.stream_updates_total += 1
-        elif state == "throttled":
-            self.stream_dropped_by_throttle_total += 1
 
-    async def _on_preview_error(self, stream: object, phase: str) -> None:
-        error_kind = getattr(stream, "last_error_kind", "")
-        error_text = getattr(stream, "last_error", "unknown error")
-        error_exc = getattr(stream, "last_exception", None)
+    async def _on_preview_error(self, stream: PreviewStream, phase: str) -> None:
+        error_kind = stream.last_error_kind
+        error_text = stream.last_error or "unknown error"
+        error_exc = stream.last_exception
         self._consecutive_preview_errors += 1
 
         if error_kind == "retry_after":

@@ -11,7 +11,7 @@ from aiogram.exceptions import (
 )
 from aiogram.types import BotCommand, InlineKeyboardMarkup, LinkPreviewOptions, MenuButtonCommands, Message, MessageEntity
 
-from logging_utils import log
+from ..logging_utils import log
 
 MAX_TELEGRAM_TEXT = 4096
 
