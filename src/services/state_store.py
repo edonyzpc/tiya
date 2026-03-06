@@ -1,30 +1,39 @@
+import asyncio
+import copy
 import json
-import threading
 from pathlib import Path
 from typing import Any, Optional, cast
 
-from domain.models import AgentProvider
+from ..domain.models import AgentProvider
 
+SCHEMA_VERSION = 2
 _PROVIDERS: tuple[AgentProvider, AgentProvider] = ("codex", "claude")
 
 
 class StateStore:
-    def __init__(self, path: Path, default_provider: AgentProvider = "codex"):
+    def __init__(self, path: Path, default_provider: AgentProvider = "codex", flush_delay_sec: float = 1.0):
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.default_provider = default_provider if default_provider in _PROVIDERS else "codex"
-        self.data: dict[str, Any] = {"users": {}}
-        self._lock = threading.Lock()
+        self.flush_delay_sec = max(0.0, float(flush_delay_sec))
+        self.data: dict[str, Any] = self._default_state()
+        self._lock = asyncio.Lock()
+        self._flush_task: Optional[asyncio.Task[None]] = None
+        self._dirty = False
         self._load()
+
+    @staticmethod
+    def _default_state() -> dict[str, Any]:
+        return {"schema_version": SCHEMA_VERSION, "users": {}}
 
     def _load(self) -> None:
         if self.path.exists():
             try:
                 self.data = json.loads(self.path.read_text(encoding="utf-8"))
             except Exception:
-                self.data = {"users": {}}
+                self.data = self._default_state()
         else:
-            self.data = {"users": {}}
+            self.data = self._default_state()
 
         changed = self._normalize_state()
         if changed:
@@ -32,6 +41,11 @@ class StateStore:
 
     def _normalize_state(self) -> bool:
         changed = False
+        schema_version = self.data.get("schema_version")
+        if schema_version != SCHEMA_VERSION:
+            self.data["schema_version"] = SCHEMA_VERSION
+            changed = True
+
         users = self.data.get("users")
         if not isinstance(users, dict):
             self.data["users"] = {}
@@ -87,7 +101,6 @@ class StateStore:
                 bucket["pending_session_pick"] = normalized_pending
                 changed = True
 
-        # Legacy schema migration -> codex bucket.
         legacy_active_session = user_data.pop("active_session_id", None)
         legacy_active_cwd = user_data.pop("active_cwd", None)
         legacy_last_session_ids = user_data.pop("last_session_ids", None)
@@ -134,11 +147,7 @@ class StateStore:
         tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp_path.replace(self.path)
 
-    def save(self) -> None:
-        with self._lock:
-            self._atomic_write(self.data)
-
-    def get_user(self, user_id: int) -> dict[str, Any]:
+    def _get_user_unlocked(self, user_id: int) -> dict[str, Any]:
         users = self.data.setdefault("users", {})
         if not isinstance(users, dict):
             users = {}
@@ -150,10 +159,13 @@ class StateStore:
         self._normalize_user_data(user_data)
         return user_data
 
-    def _resolve_provider(self, user_id: int, provider: Optional[AgentProvider]) -> AgentProvider:
+    def _resolve_provider_unlocked(self, user_id: int, provider: Optional[AgentProvider]) -> AgentProvider:
         if provider in _PROVIDERS:
             return provider
-        return self.get_active_provider(user_id)
+        active_provider = self._get_user_unlocked(user_id).get("active_provider")
+        if isinstance(active_provider, str) and active_provider in _PROVIDERS:
+            return cast(AgentProvider, active_provider)
+        return self.default_provider
 
     def _provider_bucket(self, user_data: dict[str, Any], provider: AgentProvider) -> dict[str, Any]:
         providers = user_data.setdefault("providers", {})
@@ -166,100 +178,137 @@ class StateStore:
             providers[provider] = bucket
         return cast(dict[str, Any], bucket)
 
-    def set_active_provider(self, user_id: int, provider: AgentProvider) -> None:
-        with self._lock:
-            user_data = self.get_user(user_id)
+    def _mark_dirty_unlocked(self) -> None:
+        self._dirty = True
+        if self._flush_task is None or self._flush_task.done():
+            self._flush_task = asyncio.create_task(self._flush_after_delay())
+
+    async def _flush_after_delay(self) -> None:
+        try:
+            await asyncio.sleep(self.flush_delay_sec)
+            await self.save()
+        except asyncio.CancelledError:
+            return
+
+    async def save(self) -> None:
+        async with self._lock:
+            if not self._dirty:
+                return
+            payload = copy.deepcopy(self.data)
+            self._dirty = False
+        await asyncio.to_thread(self._atomic_write, payload)
+
+    async def close(self) -> None:
+        flush_task: Optional[asyncio.Task[None]]
+        async with self._lock:
+            flush_task = self._flush_task
+            self._flush_task = None
+        if flush_task is not None and flush_task is not asyncio.current_task():
+            flush_task.cancel()
+            try:
+                await flush_task
+            except asyncio.CancelledError:
+                pass
+        await self.save()
+
+    async def set_active_provider(self, user_id: int, provider: AgentProvider) -> None:
+        async with self._lock:
+            user_data = self._get_user_unlocked(user_id)
             user_data["active_provider"] = provider
-            self._atomic_write(self.data)
+            self._mark_dirty_unlocked()
 
-    def get_active_provider(self, user_id: int) -> AgentProvider:
-        user_data = self.get_user(user_id)
-        active_provider = user_data.get("active_provider")
-        if isinstance(active_provider, str) and active_provider in _PROVIDERS:
-            return cast(AgentProvider, active_provider)
-        return self.default_provider
+    async def get_active_provider(self, user_id: int) -> AgentProvider:
+        async with self._lock:
+            user_data = self._get_user_unlocked(user_id)
+            active_provider = user_data.get("active_provider")
+            if isinstance(active_provider, str) and active_provider in _PROVIDERS:
+                return cast(AgentProvider, active_provider)
+            return self.default_provider
 
-    def set_active_session(
+    async def set_active_session(
         self,
         user_id: int,
         session_id: str,
         cwd: str,
         provider: Optional[AgentProvider] = None,
     ) -> None:
-        with self._lock:
-            user_data = self.get_user(user_id)
-            resolved_provider = self._resolve_provider(user_id, provider)
+        async with self._lock:
+            user_data = self._get_user_unlocked(user_id)
+            resolved_provider = self._resolve_provider_unlocked(user_id, provider)
             bucket = self._provider_bucket(user_data, resolved_provider)
             bucket["active_session_id"] = session_id
             bucket["active_cwd"] = cwd
-            self._atomic_write(self.data)
+            self._mark_dirty_unlocked()
 
-    def clear_active_session(
+    async def clear_active_session(
         self,
         user_id: int,
         cwd: str,
         provider: Optional[AgentProvider] = None,
     ) -> None:
-        with self._lock:
-            user_data = self.get_user(user_id)
-            resolved_provider = self._resolve_provider(user_id, provider)
+        async with self._lock:
+            user_data = self._get_user_unlocked(user_id)
+            resolved_provider = self._resolve_provider_unlocked(user_id, provider)
             bucket = self._provider_bucket(user_data, resolved_provider)
             bucket["active_session_id"] = None
             bucket["active_cwd"] = cwd
-            self._atomic_write(self.data)
+            self._mark_dirty_unlocked()
 
-    def get_active(
+    async def get_active(
         self,
         user_id: int,
         provider: Optional[AgentProvider] = None,
     ) -> tuple[Optional[str], Optional[str]]:
-        user_data = self.get_user(user_id)
-        resolved_provider = self._resolve_provider(user_id, provider)
-        bucket = self._provider_bucket(user_data, resolved_provider)
-        session_id = bucket.get("active_session_id")
-        active_cwd = bucket.get("active_cwd")
-        return (
-            session_id if isinstance(session_id, str) else None,
-            active_cwd if isinstance(active_cwd, str) else None,
-        )
+        async with self._lock:
+            user_data = self._get_user_unlocked(user_id)
+            resolved_provider = self._resolve_provider_unlocked(user_id, provider)
+            bucket = self._provider_bucket(user_data, resolved_provider)
+            session_id = bucket.get("active_session_id")
+            active_cwd = bucket.get("active_cwd")
+            return (
+                session_id if isinstance(session_id, str) else None,
+                active_cwd if isinstance(active_cwd, str) else None,
+            )
 
-    def set_last_session_ids(
+    async def set_last_session_ids(
         self,
         user_id: int,
         session_ids: list[str],
         provider: Optional[AgentProvider] = None,
     ) -> None:
-        with self._lock:
-            user_data = self.get_user(user_id)
-            resolved_provider = self._resolve_provider(user_id, provider)
+        async with self._lock:
+            user_data = self._get_user_unlocked(user_id)
+            resolved_provider = self._resolve_provider_unlocked(user_id, provider)
             bucket = self._provider_bucket(user_data, resolved_provider)
             bucket["last_session_ids"] = [str(v) for v in session_ids if str(v).strip()]
-            self._atomic_write(self.data)
+            self._mark_dirty_unlocked()
 
-    def get_last_session_ids(self, user_id: int, provider: Optional[AgentProvider] = None) -> list[str]:
-        user_data = self.get_user(user_id)
-        resolved_provider = self._resolve_provider(user_id, provider)
-        bucket = self._provider_bucket(user_data, resolved_provider)
-        values = bucket.get("last_session_ids")
-        if not isinstance(values, list):
-            return []
-        return [str(v) for v in values]
+    async def get_last_session_ids(self, user_id: int, provider: Optional[AgentProvider] = None) -> list[str]:
+        async with self._lock:
+            user_data = self._get_user_unlocked(user_id)
+            resolved_provider = self._resolve_provider_unlocked(user_id, provider)
+            bucket = self._provider_bucket(user_data, resolved_provider)
+            values = bucket.get("last_session_ids")
+            if not isinstance(values, list):
+                return []
+            return [str(v) for v in values]
 
-    def set_pending_session_pick(
+    async def set_pending_session_pick(
         self,
         user_id: int,
         enabled: bool,
         provider: Optional[AgentProvider] = None,
     ) -> None:
-        with self._lock:
-            user_data = self.get_user(user_id)
-            resolved_provider = self._resolve_provider(user_id, provider)
+        async with self._lock:
+            user_data = self._get_user_unlocked(user_id)
+            resolved_provider = self._resolve_provider_unlocked(user_id, provider)
             bucket = self._provider_bucket(user_data, resolved_provider)
             bucket["pending_session_pick"] = bool(enabled)
-            self._atomic_write(self.data)
+            self._mark_dirty_unlocked()
 
-    def is_pending_session_pick(self, user_id: int, provider: Optional[AgentProvider] = None) -> bool:
-        user_data = self.get_user(user_id)
-        resolved_provider = self._resolve_provider(user_id, provider)
-        bucket = self._provider_bucket(user_data, resolved_provider)
-        return bool(bucket.get("pending_session_pick"))
+    async def is_pending_session_pick(self, user_id: int, provider: Optional[AgentProvider] = None) -> bool:
+        async with self._lock:
+            user_data = self._get_user_unlocked(user_id)
+            resolved_provider = self._resolve_provider_unlocked(user_id, provider)
+            bucket = self._provider_bucket(user_data, resolved_provider)
+            return bool(bucket.get("pending_session_pick"))
