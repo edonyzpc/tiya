@@ -1,5 +1,4 @@
 import os
-import shutil
 from pathlib import Path
 from typing import Optional, cast
 
@@ -10,6 +9,12 @@ from .domain.models import (
     FormattingMode,
     FormattingStyle,
     LinkPreviewPolicy,
+)
+from .provider_defaults import (
+    default_claude_session_root,
+    default_codex_session_root,
+    resolve_claude_bin as resolve_claude_bin_default,
+    resolve_codex_bin as resolve_codex_bin_default,
 )
 from .runtime_paths import RuntimePaths
 
@@ -143,27 +148,11 @@ def resolve_tg_stream_enabled() -> bool:
 
 
 def resolve_codex_bin(configured: Optional[str]) -> str:
-    if configured:
-        return configured
-    found = shutil.which("codex")
-    if found:
-        return found
-    app_path = "/Applications/Codex.app/Contents/Resources/codex"
-    if Path(app_path).exists():
-        return app_path
-    return "codex"
+    return resolve_codex_bin_default(configured)
 
 
 def resolve_claude_bin(configured: Optional[str]) -> str:
-    if configured:
-        return configured
-    found = shutil.which("claude")
-    if found:
-        return found
-    default_path = Path("~/.local/bin/claude").expanduser()
-    if default_path.exists():
-        return str(default_path)
-    return "claude"
+    return resolve_claude_bin_default(configured)
 
 
 def resolve_tg_proxy() -> Optional[str]:
@@ -195,8 +184,8 @@ def load_config() -> AppConfig:
         thinking_status_interval_ms=parse_non_negative_int(env("TG_THINKING_STATUS_INTERVAL_MS", "900"), 900),
         default_cwd=Path(env("DEFAULT_CWD", os.getcwd())).expanduser(),
         state_path=Path(env("STATE_PATH", str(runtime_paths.state_file))).expanduser(),
-        codex_session_root=Path(env("CODEX_SESSION_ROOT", "~/.codex/sessions")).expanduser(),
-        claude_session_root=Path(env("CLAUDE_SESSION_ROOT", "~/.claude/projects")).expanduser(),
+        codex_session_root=Path(env("CODEX_SESSION_ROOT", str(default_codex_session_root()))).expanduser(),
+        claude_session_root=Path(env("CLAUDE_SESSION_ROOT", str(default_claude_session_root()))).expanduser(),
         codex_bin=resolve_codex_bin(env("CODEX_BIN")),
         claude_bin=resolve_claude_bin(env("CLAUDE_BIN")),
         claude_model=env("CLAUDE_MODEL"),

@@ -11,6 +11,13 @@ from pathlib import Path
 from typing import Callable, MutableMapping, Optional
 
 from .instance_lock import BotInstanceLock
+from .process_utils import pid_exists, read_process_snapshot
+from .provider_defaults import (
+    default_claude_session_root,
+    default_codex_session_root,
+    resolve_claude_bin,
+    resolve_codex_bin,
+)
 from .runtime_paths import RuntimePaths, list_runtime_instances
 
 
@@ -146,8 +153,8 @@ def validate_shared_config() -> None:
     if default_provider not in ("codex", "claude"):
         raise CliError("DEFAULT_PROVIDER 必须是 codex 或 claude")
 
-    codex_bin = _env_or_default("CODEX_BIN", "codex")
-    claude_bin = _env_or_default("CLAUDE_BIN", "claude")
+    codex_bin = resolve_codex_bin(_env_value(os.environ, "CODEX_BIN"))
+    claude_bin = resolve_claude_bin(_env_value(os.environ, "CLAUDE_BIN"))
     _validate_runner_bin("codex", codex_bin, required=default_provider == "codex")
     _validate_runner_bin("claude", claude_bin, required=default_provider == "claude")
 
@@ -195,44 +202,21 @@ def _remove_pid_file(paths: RuntimePaths) -> None:
 
 
 def _pid_exists(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
+    return pid_exists(pid)
 
 
 def _is_zombie(pid: int) -> bool:
-    stat_path = Path(f"/proc/{pid}/stat")
-    if not stat_path.is_file():
+    snapshot = read_process_snapshot(pid)
+    if snapshot is None:
         return False
-    try:
-        parts = stat_path.read_text(encoding="utf-8", errors="replace").split()
-    except OSError:
-        return False
-    return len(parts) > 2 and parts[2] == "Z"
+    return snapshot.is_zombie
 
 
 def _read_cmdline(pid: int) -> str:
-    proc_cmdline = Path(f"/proc/{pid}/cmdline")
-    if proc_cmdline.is_file():
-        try:
-            return proc_cmdline.read_bytes().replace(b"\0", b" ").decode("utf-8", errors="replace").strip()
-        except OSError:
-            return ""
-
-    try:
-        result = subprocess.run(
-            ["ps", "-o", "command=", "-p", str(pid)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except OSError:
+    snapshot = read_process_snapshot(pid)
+    if snapshot is None:
         return ""
-    return result.stdout.strip()
+    return snapshot.cmdline
 
 
 def _cmdline_matches(cmdline: str) -> bool:
@@ -246,11 +230,12 @@ def _cmdline_matches(cmdline: str) -> bool:
 def _is_pid_running(pid: Optional[int]) -> bool:
     if pid is None or pid <= 0:
         return False
-    if not _pid_exists(pid):
+    snapshot = read_process_snapshot(pid)
+    if snapshot is None:
         return False
-    if _is_zombie(pid):
+    if snapshot.is_zombie:
         return False
-    return _cmdline_matches(_read_cmdline(pid))
+    return _cmdline_matches(snapshot.cmdline)
 
 
 def _read_lock_owner_pid(paths: RuntimePaths) -> Optional[int]:
@@ -292,6 +277,8 @@ def _resolve_stream_enabled() -> str:
 
 
 def _build_child_env(paths: RuntimePaths) -> dict[str, str]:
+    resolved_codex_bin = resolve_codex_bin(_env_value(os.environ, "CODEX_BIN"))
+    resolved_claude_bin = resolve_claude_bin(_env_value(os.environ, "CLAUDE_BIN"))
     child_env = dict(os.environ)
     child_env.update(
         {
@@ -300,15 +287,13 @@ def _build_child_env(paths: RuntimePaths) -> dict[str, str]:
             "ALLOWED_CWD_ROOTS": _env_or_default("ALLOWED_CWD_ROOTS", ""),
             "DEFAULT_CWD": _env_or_default("DEFAULT_CWD", str(REPO_ROOT)),
             "DEFAULT_PROVIDER": _env_or_default("DEFAULT_PROVIDER", "codex"),
-            "CODEX_BIN": _env_or_default("CODEX_BIN", "codex"),
-            "CODEX_SESSION_ROOT": _env_or_default("CODEX_SESSION_ROOT", str(Path("~/.codex/sessions").expanduser())),
+            "CODEX_BIN": resolved_codex_bin,
+            "CODEX_SESSION_ROOT": _env_or_default("CODEX_SESSION_ROOT", str(default_codex_session_root())),
             "CODEX_SANDBOX_MODE": _env_or_default("CODEX_SANDBOX_MODE", ""),
             "CODEX_APPROVAL_POLICY": _env_or_default("CODEX_APPROVAL_POLICY", ""),
             "CODEX_DANGEROUS_BYPASS": _env_or_default("CODEX_DANGEROUS_BYPASS", "0"),
-            "CLAUDE_BIN": _env_or_default("CLAUDE_BIN", "claude"),
-            "CLAUDE_SESSION_ROOT": _env_or_default(
-                "CLAUDE_SESSION_ROOT", str(Path("~/.claude/projects").expanduser())
-            ),
+            "CLAUDE_BIN": resolved_claude_bin,
+            "CLAUDE_SESSION_ROOT": _env_or_default("CLAUDE_SESSION_ROOT", str(default_claude_session_root())),
             "CLAUDE_MODEL": _env_or_default("CLAUDE_MODEL", ""),
             "CLAUDE_PERMISSION_MODE": _env_or_default("CLAUDE_PERMISSION_MODE", "default"),
             "STATE_PATH": str(paths.state_file),

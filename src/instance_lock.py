@@ -7,6 +7,8 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from .process_utils import read_process_cmdline
+
 
 def token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
@@ -21,17 +23,6 @@ def build_token_lock_path(base_path: Path, token: str) -> Path:
     else:
         name = f"{base.name}.{hashed}.lock"
     return base.with_name(name)
-
-
-def _read_cmdline(pid: int) -> str:
-    cmdline_path = Path(f"/proc/{pid}/cmdline")
-    if not cmdline_path.is_file():
-        return ""
-    try:
-        raw = cmdline_path.read_bytes()
-    except OSError:
-        return ""
-    return raw.replace(b"\0", b" ").decode("utf-8", errors="replace").strip()
 
 
 class BotInstanceLock:
@@ -56,7 +47,7 @@ class BotInstanceLock:
         self._fd = fd
         payload = {
             "pid": os.getpid(),
-            "cmdline": _read_cmdline(os.getpid()),
+            "cmdline": read_process_cmdline(os.getpid()),
             "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "lock_path": str(self.path),
             "token_hash": self.token_digest,

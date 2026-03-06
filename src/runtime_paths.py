@@ -1,6 +1,7 @@
 import os
 from dataclasses import dataclass
 from pathlib import Path
+import platform
 from typing import Mapping, Optional
 
 from .instance_lock import token_hash
@@ -18,6 +19,13 @@ def _env_value(environ: Mapping[str, str], key: str) -> Optional[str]:
     return value or None
 
 
+def default_runtime_home(system_name: Optional[str] = None) -> Path:
+    current_system = system_name or platform.system()
+    if current_system == "Darwin":
+        return Path("~/Library/Application Support").expanduser() / APP_NAME
+    return Path("~/.local/state").expanduser() / APP_NAME
+
+
 def resolve_runtime_home(environ: Mapping[str, str]) -> Path:
     explicit = _env_value(environ, "TIYA_HOME")
     if explicit:
@@ -27,7 +35,7 @@ def resolve_runtime_home(environ: Mapping[str, str]) -> Path:
     if xdg_state_home:
         return Path(xdg_state_home).expanduser() / APP_NAME
 
-    return Path("~/.local/state").expanduser() / APP_NAME
+    return default_runtime_home()
 
 
 @dataclass(frozen=True)

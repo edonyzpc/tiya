@@ -3,7 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from src import cli
+from src.config import load_config
 from src.instance_lock import BotInstanceLock
+from src.process_utils import ProcessSnapshot
 from src.runtime_paths import RuntimePaths
 
 
@@ -129,6 +131,32 @@ def test_start_uses_module_entry_and_writes_pid(monkeypatch, tmp_path: Path):
     assert called["start_new_session"] is True
 
 
+def test_build_child_env_matches_config_runner_resolution(monkeypatch, tmp_path: Path):
+    token = "123456:abcdefghijklmnopqrstuvwxyz12345"
+    expected_codex = "/Applications/Codex.app/Contents/Resources/codex"
+    expected_claude = "/opt/homebrew/bin/claude"
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", token)
+    monkeypatch.setenv("DEFAULT_CWD", str(tmp_path))
+    monkeypatch.delenv("CODEX_BIN", raising=False)
+    monkeypatch.delenv("CLAUDE_BIN", raising=False)
+    monkeypatch.setattr(cli, "resolve_codex_bin", lambda configured: expected_codex)
+    monkeypatch.setattr(cli, "resolve_claude_bin", lambda configured: expected_claude)
+    monkeypatch.setattr("src.config.resolve_codex_bin_default", lambda configured: expected_codex)
+    monkeypatch.setattr("src.config.resolve_claude_bin_default", lambda configured: expected_claude)
+
+    runtime_paths = RuntimePaths.for_token(token, {"TIYA_HOME": str(tmp_path)})
+    child_env = cli._build_child_env(runtime_paths)
+    config = load_config()
+
+    assert child_env["CODEX_BIN"] == expected_codex
+    assert child_env["CLAUDE_BIN"] == expected_claude
+    assert child_env["CODEX_BIN"] == config.codex_bin
+    assert child_env["CLAUDE_BIN"] == config.claude_bin
+    assert child_env["CODEX_SESSION_ROOT"] == str(config.codex_session_root)
+    assert child_env["CLAUDE_SESSION_ROOT"] == str(config.claude_session_root)
+
+
 def test_start_rejects_when_instance_lock_is_occupied(monkeypatch, tmp_path: Path):
     token = "123456:abcdefghijklmnopqrstuvwxyz12345"
     paths = RuntimePaths.for_token(token, {"TIYA_HOME": str(tmp_path)})
@@ -158,6 +186,24 @@ def test_start_rejects_when_instance_lock_is_occupied(monkeypatch, tmp_path: Pat
     assert "popen_called" not in called
 
 
+def test_is_pid_running_rejects_zombie_snapshot(monkeypatch):
+    monkeypatch.setattr(
+        "src.cli.read_process_snapshot",
+        lambda pid: ProcessSnapshot(pid=pid, stat="Z", cmdline="python -m src"),
+    )
+
+    assert cli._is_pid_running(321) is False
+
+
+def test_is_pid_running_rejects_defunct_snapshot(monkeypatch):
+    monkeypatch.setattr(
+        "src.cli.read_process_snapshot",
+        lambda pid: ProcessSnapshot(pid=pid, stat="S", cmdline="python <defunct>"),
+    )
+
+    assert cli._is_pid_running(654) is False
+
+
 def test_probe_instance_lock_allows_stale_lock_file(tmp_path: Path):
     token = "123456:abcdefghijklmnopqrstuvwxyz12345"
     paths = RuntimePaths.for_instance_name(root=tmp_path, instance_name="instance-a")
@@ -175,9 +221,10 @@ def test_probe_instance_lock_allows_stale_lock_file(tmp_path: Path):
     assert msg == ""
 
 
-def test_probe_instance_lock_rejects_when_held(tmp_path: Path):
+def test_probe_instance_lock_rejects_when_held(monkeypatch, tmp_path: Path):
     token = "123456:abcdefghijklmnopqrstuvwxyz12345"
     paths = RuntimePaths.for_instance_name(root=tmp_path, instance_name="instance-a")
+    monkeypatch.setattr("src.instance_lock.read_process_cmdline", lambda pid: "python -m src")
     holder = BotInstanceLock(paths.lock_base, token)
     acquired, _ = holder.acquire()
     assert acquired is True
@@ -189,5 +236,6 @@ def test_probe_instance_lock_rejects_when_held(tmp_path: Path):
         ok, msg = cli._probe_instance_lock(env, paths)
         assert ok is False
         assert "owner_pid=" in msg
+        assert "python -m src" in msg
     finally:
         holder.release()
