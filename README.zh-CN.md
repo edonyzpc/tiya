@@ -83,6 +83,8 @@ export TG_HTTP_RETRY_BASE_MS=300
 export TG_HTTP_RETRY_MAX_MS=3000
 
 # 运行时目录（可选）
+# Linux 默认值：~/.local/state/tiya
+# macOS 默认值：~/Library/Application Support/tiya
 export TIYA_HOME="$HOME/.local/state/tiya"
 # 开发态如需将运行时文件放回仓库，可显式设置：
 # export TIYA_HOME="$(pwd)/.runtime"
@@ -98,6 +100,10 @@ export HTTP_PROXY="http://127.0.0.1:7897"
 
 # Codex
 export DEFAULT_CWD="/path/to/your/project"
+# 如果 `codex` 已在 PATH 中，可不显式设置。
+# macOS 还会自动探测：
+#   /Applications/Codex.app/Contents/Resources/codex
+#   ~/Applications/Codex.app/Contents/Resources/codex
 export CODEX_BIN="codex"
 export CODEX_SESSION_ROOT="$HOME/.codex/sessions"
 export CODEX_SANDBOX_MODE=""
@@ -105,6 +111,11 @@ export CODEX_APPROVAL_POLICY=""
 export CODEX_DANGEROUS_BYPASS=0
 
 # Claude
+# 如果 `claude` 已在 PATH 中，可不显式设置。
+# macOS 还会自动探测：
+#   /opt/homebrew/bin/claude
+#   /usr/local/bin/claude
+#   ~/.local/bin/claude
 export CLAUDE_BIN="claude"
 export CLAUDE_SESSION_ROOT="$HOME/.claude/projects"
 export CLAUDE_MODEL=""                                # 可选
@@ -168,6 +179,7 @@ uv run pytest
 - `run.sh` 已移除，仅保留 `uv run <command>`。
 - 仅使用 `uv run start` 启动。不要再额外运行 `python -m tg_codex` 等同 token 轮询进程。
 - 运行时文件会存放到 `TIYA_HOME/instances/<token_hash>/`。
+- macOS 支持当前与 Linux 的 CLI 用法对齐；本版本不包含 `launchd` 集成。
 - `CODEX_DANGEROUS_BYPASS` 仅应在受控用户、受控主机环境下使用。
 
 ## 简单 Prompt 很慢时的排查

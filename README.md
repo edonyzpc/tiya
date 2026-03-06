@@ -83,6 +83,8 @@ export TG_HTTP_RETRY_BASE_MS=300
 export TG_HTTP_RETRY_MAX_MS=3000
 
 # Runtime home (optional)
+# Linux default: ~/.local/state/tiya
+# macOS default: ~/Library/Application Support/tiya
 export TIYA_HOME="$HOME/.local/state/tiya"
 # For repo-local runtime files during development:
 # export TIYA_HOME="$(pwd)/.runtime"
@@ -98,6 +100,10 @@ export HTTP_PROXY="http://127.0.0.1:7897"
 
 # Codex
 export DEFAULT_CWD="/path/to/your/project"
+# Optional if `codex` is already on PATH.
+# macOS auto-discovery also checks:
+#   /Applications/Codex.app/Contents/Resources/codex
+#   ~/Applications/Codex.app/Contents/Resources/codex
 export CODEX_BIN="codex"
 export CODEX_SESSION_ROOT="$HOME/.codex/sessions"
 export CODEX_SANDBOX_MODE=""
@@ -105,6 +111,11 @@ export CODEX_APPROVAL_POLICY=""
 export CODEX_DANGEROUS_BYPASS=0
 
 # Claude
+# Optional if `claude` is already on PATH.
+# macOS auto-discovery also checks:
+#   /opt/homebrew/bin/claude
+#   /usr/local/bin/claude
+#   ~/.local/bin/claude
 export CLAUDE_BIN="claude"
 export CLAUDE_SESSION_ROOT="$HOME/.claude/projects"
 export CLAUDE_MODEL=""                                # optional
@@ -168,6 +179,7 @@ uv run pytest
 - `run.sh` has been removed. Use `uv run <command>` only.
 - Start with `uv run start` only. Do not run extra polling processes (for example `python -m tg_codex`) with the same bot token.
 - Runtime files are stored under `TIYA_HOME/instances/<token_hash>/`.
+- macOS support is aligned to the current Linux CLI flow. `launchd` integration is not included in this release.
 - `CODEX_DANGEROUS_BYPASS` should be used only for trusted users and trusted hosts.
 
 ## Troubleshooting Slow First Token
