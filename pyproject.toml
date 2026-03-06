@@ -8,6 +8,7 @@ license = { text = "Apache-2.0" }
 dependencies = [
   "aiogram>=3.26.0,<4.0.0",
   "aiohttp-socks>=0.10.1,<0.11.0",
+  "claude-agent-sdk>=0.1.47,<0.2.0",
   "telegramify-markdown[mermaid]==1.0.0rc5",
 ]
 
