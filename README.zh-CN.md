@@ -40,6 +40,7 @@ uv sync --group dev
 ```bash
 TELEGRAM_BOT_TOKEN="your bot token"
 ALLOWED_TELEGRAM_USER_IDS="123456789"
+ALLOWED_CWD_ROOTS="/path/to/your/project"
 DEFAULT_CWD="/path/to/your/project"
 DEFAULT_PROVIDER="codex"
 CODEX_BIN="codex"
@@ -58,6 +59,7 @@ export ALLOWED_TELEGRAM_USER_IDS="123456789"         # 可选，推荐
 
 # Provider
 export DEFAULT_PROVIDER=codex                         # codex 或 claude
+export ALLOWED_CWD_ROOTS="/path/to/allowed-a,/path/to/allowed-b"  # 可选
 
 # 流式参数
 export TG_STREAM_ENABLED=1
@@ -70,20 +72,23 @@ export TG_STREAM_PREVIEW_FAILFAST=1
 
 # 消息格式化 / 渲染
 export TG_FORMATTING_ENABLED=1
-export TG_FORMATTING_FINAL_ONLY=1
 export TG_FORMATTING_STYLE="strong"                  # light | medium | strong
 export TG_FORMATTING_MODE="html"                     # html | plain
 export TG_LINK_PREVIEW_POLICY="auto"                 # auto | off
 export TG_FORMATTING_FAIL_OPEN=1
-export TG_FORMATTING_BACKEND="builtin"               # builtin | telegramify | sulguk
 
 # 网络重试
 export TG_HTTP_MAX_RETRIES=2
 export TG_HTTP_RETRY_BASE_MS=300
 export TG_HTTP_RETRY_MAX_MS=3000
 
-# 单实例锁（同一个 Bot Token）
-export TG_INSTANCE_LOCK_PATH="./.runtime/bot.lock"
+# 运行时目录（可选）
+export TIYA_HOME="$HOME/.local/state/tiya"
+# 开发态如需将运行时文件放回仓库，可显式设置：
+# export TIYA_HOME="$(pwd)/.runtime"
+
+# 显式锁路径覆盖（可选）
+# export TG_INSTANCE_LOCK_PATH="/custom/path/bot.lock"
 
 # 代理（可选，仅在 VPN/网络策略需要时配置）
 export TG_PROXY_URL="http://127.0.0.1:7897"
@@ -136,6 +141,7 @@ uv run restart
 ## 目录结构
 
 - `tiya.py`：启动入口
+- `src/runtime_paths.py`：按 token 分隔的运行时路径解析
 - `src/cli.py`：服务管理命令（`start|stop|restart|status|logs`）
 - `src/app.py`：应用装配与轮询启动
 - `src/config.py`：环境变量解析
@@ -157,9 +163,12 @@ uv run pytest
 ## 备注
 
 - 当 `TG_STREAM_ENABLED` 未设置时，仍兼容旧变量 `TELEGRAM_ENABLE_DRAFT_STREAM`。
+- `TG_FORMATTING_FINAL_ONLY` 与 `TG_FORMATTING_BACKEND` 已废弃，设置后会被忽略。
 - 当前架构按设计仅支持长轮询模式。
 - `run.sh` 已移除，仅保留 `uv run <command>`。
 - 仅使用 `uv run start` 启动。不要再额外运行 `python -m tg_codex` 等同 token 轮询进程。
+- 运行时文件会存放到 `TIYA_HOME/instances/<token_hash>/`。
+- `CODEX_DANGEROUS_BYPASS` 仅应在受控用户、受控主机环境下使用。
 
 ## 简单 Prompt 很慢时的排查
 
@@ -173,8 +182,8 @@ uv run pytest
 
 ## “半句卡住”排查
 
-- `tiya` 已对同 token 启用实例锁；若看到 `instance lock rejected`，说明已有实例占用。
+- `tiya` 已对同 token 启用实例锁，并按 token 分隔 PID / 日志 / 状态文件。
 - 可先执行：
   - `uv run stop`
-  - `ps -ef | rg "tiya.py|python -m tg_codex"`
+  - `ps -ef | rg "python -m src|tiya.py"`
 - 遇到 Telegram 限流时，流式预览会自动降级为 `typing + 最终消息`，最终完整答案仍会发送。

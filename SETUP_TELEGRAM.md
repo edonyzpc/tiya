@@ -22,6 +22,7 @@ uv sync --group dev
 ```bash
 export TELEGRAM_BOT_TOKEN="123456:xxxx"
 export ALLOWED_TELEGRAM_USER_IDS="123456789"  # optional but recommended
+export ALLOWED_CWD_ROOTS="/path/to/project"   # optional
 
 export DEFAULT_PROVIDER="codex"                # codex or claude
 export DEFAULT_CWD="/path/to/project"
@@ -43,17 +44,17 @@ export TG_STREAM_MAX_CONSECUTIVE_PREVIEW_ERRORS=2
 export TG_STREAM_PREVIEW_FAILFAST=1
 
 export TG_FORMATTING_ENABLED=1
-export TG_FORMATTING_FINAL_ONLY=1
 export TG_FORMATTING_STYLE="strong"         # light | medium | strong
 export TG_FORMATTING_MODE="html"            # html | plain
 export TG_LINK_PREVIEW_POLICY="auto"        # auto | off
 export TG_FORMATTING_FAIL_OPEN=1
-export TG_FORMATTING_BACKEND="builtin"      # builtin | telegramify | sulguk
 
 export TG_HTTP_MAX_RETRIES=2
 export TG_HTTP_RETRY_BASE_MS=300
 export TG_HTTP_RETRY_MAX_MS=3000
-export TG_INSTANCE_LOCK_PATH="./.runtime/bot.lock"
+export TIYA_HOME="$HOME/.local/state/tiya"
+# For repo-local runtime files during development:
+# export TIYA_HOME="$(pwd)/.runtime"
 
 # Optional proxy (only if VPN / network policy needs it)
 export TG_PROXY_URL="http://127.0.0.1:7897"
@@ -75,7 +76,7 @@ uv run status
 uv run logs
 ```
 
-If logs show `tiya service started`, the bot is running.
+If logs show `tiya service ready`, the bot is running.
 
 ## 5) Switch provider in Telegram
 
@@ -98,5 +99,6 @@ uv run restart
 
 - Polling mode only.
 - Legacy variable `TELEGRAM_ENABLE_DRAFT_STREAM` is still supported as fallback.
+- `TG_FORMATTING_FINAL_ONLY` and `TG_FORMATTING_BACKEND` are deprecated and ignored.
 - `run.sh` has been removed. Use `uv run <command>`.
 - Use `uv run start` as the only startup entry. Avoid extra polling process for the same token (for example `python -m tg_codex`).

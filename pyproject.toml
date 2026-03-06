@@ -11,11 +11,11 @@ dependencies = [
 ]
 
 [project.scripts]
-start = "tiya:entry_start"
-stop = "tiya:entry_stop"
-restart = "tiya:entry_restart"
-status = "tiya:entry_status"
-logs = "tiya:entry_logs"
+start = "src.cli:entry_start"
+stop = "src.cli:entry_stop"
+restart = "src.cli:entry_restart"
+status = "src.cli:entry_status"
+logs = "src.cli:entry_logs"
 
 [dependency-groups]
 dev = [
@@ -31,6 +31,6 @@ build-backend = "hatchling.build"
 packages = ["src"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["."]
 asyncio_mode = "auto"
 addopts = "-q"
