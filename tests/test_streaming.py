@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.domain.models import StreamConfig
-from src.telegram.rendering import TelegramMessageRenderer
+from src.telegram.rendering import RenderProfile, RenderResult, RenderedFile, RenderedPhoto, RenderedText, TelegramMessageRenderer
 from src.telegram.streaming import StreamOrchestrator
 
 
@@ -22,14 +22,20 @@ class FakeTelegramClient:
         draft_retry_after_times: int = 0,
         edit_retry_after_times: int = 0,
         send_message_parse_fail: bool = False,
+        send_document_fail: bool = False,
+        send_photo_fail: bool = False,
     ):
         self.draft_fail = draft_fail
         self.edit_fail = edit_fail
         self.draft_retry_after_times = max(0, int(draft_retry_after_times))
         self.edit_retry_after_times = max(0, int(edit_retry_after_times))
         self.send_message_parse_fail = bool(send_message_parse_fail)
+        self.send_document_fail = bool(send_document_fail)
+        self.send_photo_fail = bool(send_photo_fail)
         self.events = []
         self.send_message_calls = []
+        self.send_document_calls = []
+        self.send_photo_calls = []
         self.send_message_draft_calls = []
         self.send_message_with_result_calls = []
         self.edit_message_text_calls = []
@@ -59,8 +65,64 @@ class FakeTelegramClient:
                 "link_preview_options": link_preview_options,
             }
         )
-        if self.send_message_parse_fail and parse_mode:
+        if self.send_message_parse_fail and (parse_mode or entities):
             raise RuntimeError("can't parse entities")
+
+    async def send_document(
+        self,
+        chat_id,
+        file_name,
+        file_data,
+        caption_text=None,
+        caption_entities=None,
+        reply_to=None,
+        reply_markup=None,
+        message_thread_id=None,
+    ):
+        self.events.append(("send_document", chat_id, file_name, reply_to))
+        self.send_document_calls.append(
+            {
+                "chat_id": chat_id,
+                "file_name": file_name,
+                "file_data": file_data,
+                "caption_text": caption_text,
+                "caption_entities": caption_entities,
+                "reply_to": reply_to,
+                "reply_markup": reply_markup,
+                "message_thread_id": message_thread_id,
+            }
+        )
+        if self.send_document_fail:
+            raise RuntimeError("document unavailable")
+        return SimpleNamespace(message_id=778)
+
+    async def send_photo(
+        self,
+        chat_id,
+        file_name,
+        file_data,
+        caption_text=None,
+        caption_entities=None,
+        reply_to=None,
+        reply_markup=None,
+        message_thread_id=None,
+    ):
+        self.events.append(("send_photo", chat_id, file_name, reply_to))
+        self.send_photo_calls.append(
+            {
+                "chat_id": chat_id,
+                "file_name": file_name,
+                "file_data": file_data,
+                "caption_text": caption_text,
+                "caption_entities": caption_entities,
+                "reply_to": reply_to,
+                "reply_markup": reply_markup,
+                "message_thread_id": message_thread_id,
+            }
+        )
+        if self.send_photo_fail:
+            raise RuntimeError("photo unavailable")
+        return SimpleNamespace(message_id=779)
 
     async def send_message_draft(
         self,
@@ -305,3 +367,164 @@ class TestStreamOrchestrator:
         assert len(api.send_message_calls) == 2
         assert api.send_message_calls[0]["parse_mode"] == "HTML"
         assert api.send_message_calls[1]["parse_mode"] is None
+
+    @pytest.mark.asyncio
+    async def test_final_render_telegramify_text_uses_entities(self):
+        renderer = TelegramMessageRenderer(
+            enabled=True,
+            final_only=True,
+            style="strong",
+            mode="html",
+            link_preview_policy="auto",
+            fail_open=True,
+            backend="telegramify",
+        )
+        api = FakeTelegramClient()
+        orchestrator = self._orchestrator(api, enabled=False, renderer=renderer)
+        await orchestrator.start()
+        await orchestrator.finalize_success("# 标题\n\n| A | B |\n| --- | --- |\n| 1 | 2 |", reply_to=999)
+
+        assert api.send_message_calls
+        assert api.send_message_calls[0]["parse_mode"] is None
+        assert api.send_message_calls[0]["entities"]
+
+    @pytest.mark.asyncio
+    async def test_final_render_sequentially_sends_text_file_and_photo(self, monkeypatch):
+        renderer = TelegramMessageRenderer(
+            enabled=True,
+            final_only=True,
+            style="strong",
+            mode="html",
+            link_preview_policy="auto",
+            fail_open=True,
+            backend="telegramify",
+        )
+
+        async def _fake_render(_: str, __: RenderProfile) -> RenderResult:
+            return RenderResult(
+                items=[
+                    RenderedText(
+                        text="intro",
+                        parse_mode=None,
+                        entities=None,
+                        disable_web_page_preview=None,
+                        fallback_text="intro",
+                    ),
+                    RenderedFile(
+                        file_name="code.py",
+                        file_data=b"print(1)\n",
+                        caption_text="file caption",
+                        caption_entities=None,
+                        disable_web_page_preview=None,
+                        fallback_text="full markdown fallback",
+                    ),
+                    RenderedPhoto(
+                        file_name="diagram.webp",
+                        file_data=b"img",
+                        caption_text="photo caption",
+                        caption_entities=None,
+                        disable_web_page_preview=None,
+                        fallback_text="full markdown fallback",
+                    ),
+                    RenderedText(
+                        text="outro",
+                        parse_mode=None,
+                        entities=None,
+                        disable_web_page_preview=None,
+                        fallback_text="outro",
+                    ),
+                ],
+                render_mode="telegramify",
+                parse_errors=0,
+            )
+
+        monkeypatch.setattr(renderer, "render_text", _fake_render)
+        api = FakeTelegramClient()
+        orchestrator = self._orchestrator(api, enabled=False, renderer=renderer)
+        await orchestrator.start()
+        await orchestrator.finalize_success("ignored", reply_to=999)
+
+        assert [event[0] for event in api.events] == ["send_message", "send_document", "send_photo", "send_message"]
+
+    @pytest.mark.asyncio
+    async def test_final_render_media_file_failure_falls_back_to_plain_text(self, monkeypatch):
+        renderer = TelegramMessageRenderer(
+            enabled=True,
+            final_only=True,
+            style="strong",
+            mode="html",
+            link_preview_policy="auto",
+            fail_open=True,
+            backend="telegramify",
+        )
+
+        async def _fake_render(_: str, __: RenderProfile) -> RenderResult:
+            return RenderResult(
+                items=[
+                    RenderedText(
+                        text="intro",
+                        parse_mode=None,
+                        entities=None,
+                        disable_web_page_preview=None,
+                        fallback_text="intro",
+                    ),
+                    RenderedFile(
+                        file_name="code.py",
+                        file_data=b"print(1)\n",
+                        caption_text="",
+                        caption_entities=None,
+                        disable_web_page_preview=None,
+                        fallback_text="full markdown fallback",
+                    ),
+                ],
+                render_mode="telegramify",
+                parse_errors=0,
+            )
+
+        monkeypatch.setattr(renderer, "render_text", _fake_render)
+        api = FakeTelegramClient(send_document_fail=True)
+        orchestrator = self._orchestrator(api, enabled=False, renderer=renderer)
+        await orchestrator.start()
+        await orchestrator.finalize_success("ignored", reply_to=999)
+
+        assert len(api.send_document_calls) == 1
+        assert api.send_message_calls[0]["text"] == "intro"
+        assert api.send_message_calls[-1]["text"] == "full markdown fallback"
+        assert api.send_message_calls[-1]["parse_mode"] is None
+
+    @pytest.mark.asyncio
+    async def test_final_render_media_photo_failure_falls_back_to_plain_text(self, monkeypatch):
+        renderer = TelegramMessageRenderer(
+            enabled=True,
+            final_only=True,
+            style="strong",
+            mode="html",
+            link_preview_policy="auto",
+            fail_open=True,
+            backend="telegramify",
+        )
+
+        async def _fake_render(_: str, __: RenderProfile) -> RenderResult:
+            return RenderResult(
+                items=[
+                    RenderedPhoto(
+                        file_name="diagram.webp",
+                        file_data=b"img",
+                        caption_text="",
+                        caption_entities=None,
+                        disable_web_page_preview=None,
+                        fallback_text="full markdown fallback",
+                    ),
+                ],
+                render_mode="telegramify",
+                parse_errors=0,
+            )
+
+        monkeypatch.setattr(renderer, "render_text", _fake_render)
+        api = FakeTelegramClient(send_photo_fail=True)
+        orchestrator = self._orchestrator(api, enabled=False, renderer=renderer)
+        await orchestrator.start()
+        await orchestrator.finalize_success("ignored", reply_to=999)
+
+        assert len(api.send_photo_calls) == 1
+        assert api.send_message_calls[-1]["text"] == "full markdown fallback"

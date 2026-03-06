@@ -74,6 +74,7 @@ export TG_STREAM_PREVIEW_FAILFAST=1
 export TG_FORMATTING_ENABLED=1
 export TG_FORMATTING_STYLE="strong"                  # light | medium | strong
 export TG_FORMATTING_MODE="html"                     # html | plain
+export TG_FORMATTING_BACKEND="telegramify"           # telegramify | builtin | sulguk(回退到 builtin)
 export TG_LINK_PREVIEW_POLICY="auto"                 # auto | off
 export TG_FORMATTING_FAIL_OPEN=1
 
@@ -174,7 +175,10 @@ uv run pytest
 ## 备注
 
 - 当 `TG_STREAM_ENABLED` 未设置时，仍兼容旧变量 `TELEGRAM_ENABLE_DRAFT_STREAM`。
-- `TG_FORMATTING_FINAL_ONLY` 与 `TG_FORMATTING_BACKEND` 已废弃，设置后会被忽略。
+- `TG_FORMATTING_FINAL_ONLY` 已废弃并会被忽略。
+- `TG_FORMATTING_BACKEND` 现已生效，默认值为 `telegramify`；`sulguk` 当前会回退到 `builtin`。
+- Markdown table 会降级为等宽文本块显示，不会变成 Telegram 原生表格。
+- 最终回答阶段，`telegramify()` 可能会把代码块发送为文件、把 Mermaid 发送为图片。
 - 当前架构按设计仅支持长轮询模式。
 - `run.sh` 已移除，仅保留 `uv run <command>`。
 - 仅使用 `uv run start` 启动。不要再额外运行 `python -m tg_codex` 等同 token 轮询进程。

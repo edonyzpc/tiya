@@ -74,6 +74,7 @@ export TG_STREAM_PREVIEW_FAILFAST=1
 export TG_FORMATTING_ENABLED=1
 export TG_FORMATTING_STYLE="strong"                  # light | medium | strong
 export TG_FORMATTING_MODE="html"                     # html | plain
+export TG_FORMATTING_BACKEND="telegramify"           # telegramify | builtin | sulguk(fallback to builtin)
 export TG_LINK_PREVIEW_POLICY="auto"                 # auto | off
 export TG_FORMATTING_FAIL_OPEN=1
 
@@ -174,7 +175,10 @@ uv run pytest
 ## Notes
 
 - Legacy env `TELEGRAM_ENABLE_DRAFT_STREAM` is still honored when `TG_STREAM_ENABLED` is unset.
-- `TG_FORMATTING_FINAL_ONLY` and `TG_FORMATTING_BACKEND` are deprecated and ignored.
+- `TG_FORMATTING_FINAL_ONLY` is deprecated and ignored.
+- `TG_FORMATTING_BACKEND` is active. Default is `telegramify`; `sulguk` currently falls back to `builtin`.
+- Markdown tables are rendered as monospace text blocks, not Telegram native tables.
+- `telegramify()` may send code blocks as files and Mermaid diagrams as photos in final assistant replies.
 - Polling mode only by design in current architecture.
 - `run.sh` has been removed. Use `uv run <command>` only.
 - Start with `uv run start` only. Do not run extra polling processes (for example `python -m tg_codex`) with the same bot token.

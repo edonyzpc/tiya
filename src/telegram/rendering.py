@@ -2,7 +2,9 @@ import html
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Protocol
+from typing import Optional
+
+from aiogram.types import MessageEntity
 
 from ..domain.models import FormattingBackend, FormattingMode, FormattingStyle, LinkPreviewPolicy
 
@@ -34,23 +36,42 @@ class RenderProfile(str, Enum):
 
 
 @dataclass(frozen=True)
-class RenderedChunk:
+class RenderedText:
     text: str
     parse_mode: Optional[str]
+    entities: Optional[list[MessageEntity]]
     disable_web_page_preview: Optional[bool]
     fallback_text: str
 
 
 @dataclass(frozen=True)
+class RenderedFile:
+    file_name: str
+    file_data: bytes
+    caption_text: str
+    caption_entities: Optional[list[MessageEntity]]
+    disable_web_page_preview: Optional[bool]
+    fallback_text: str
+
+
+@dataclass(frozen=True)
+class RenderedPhoto:
+    file_name: str
+    file_data: bytes
+    caption_text: str
+    caption_entities: Optional[list[MessageEntity]]
+    disable_web_page_preview: Optional[bool]
+    fallback_text: str
+
+
+RenderedItem = RenderedText | RenderedFile | RenderedPhoto
+
+
+@dataclass(frozen=True)
 class RenderResult:
-    chunks: list[RenderedChunk]
+    items: list[RenderedItem]
     render_mode: str
     parse_errors: int
-
-
-class RendererBackend(Protocol):
-    def render_blocks(self, text: str, profile: RenderProfile) -> tuple[list[str], int]:
-        ...
 
 
 class BuiltinRendererBackend:
@@ -269,11 +290,13 @@ class TelegramMessageRenderer:
         self.mode = mode
         self.link_preview_policy = link_preview_policy
         self.fail_open = bool(fail_open)
-        self.backend = "builtin" if backend != "builtin" else backend
+        self.backend = "builtin" if backend == "sulguk" else backend
         self.max_chunk_chars = max(100, min(3900, int(max_chunk_chars)))
         self._builtin_backend = BuiltinRendererBackend(style=style)
+        if self.backend == "telegramify":
+            self._configure_telegramify_runtime()
 
-    def render_text(self, text: str, profile: RenderProfile) -> RenderResult:
+    async def render_text(self, text: str, profile: RenderProfile) -> RenderResult:
         cleaned = self._sanitize_text(text)
         if not cleaned.strip():
             cleaned = "Codex 没有返回可展示内容。"
@@ -283,50 +306,136 @@ class TelegramMessageRenderer:
         if self.mode == "plain":
             return self._render_plain(cleaned, render_mode="plain", parse_errors=0)
 
-        backend = self._resolve_backend()
-
         try:
-            blocks, parse_errors = backend.render_blocks(cleaned, profile)
-            html_chunks = self._chunk_blocks(blocks)
-            if not html_chunks:
-                html_chunks = [html.escape(cleaned, quote=False)]
-            disable_preview = True if self.link_preview_policy == "off" else None
-            chunks = [
-                RenderedChunk(
-                    text=chunk,
-                    parse_mode="HTML",
-                    disable_web_page_preview=disable_preview,
-                    fallback_text=self._html_to_plain_text(chunk),
-                )
-                for chunk in html_chunks
-            ]
-            return RenderResult(
-                chunks=chunks,
-                render_mode="html",
-                parse_errors=parse_errors,
-            )
+            if self.backend == "telegramify":
+                return await self._render_telegramify(cleaned, profile)
+            return self._render_builtin(cleaned, profile)
         except Exception:
             if not self.fail_open:
                 raise
             return self._render_plain(cleaned, render_mode="plain_fallback", parse_errors=1)
 
-    def _resolve_backend(self) -> RendererBackend:
-        # Keep an extension point for future backends.
-        return self._builtin_backend
+    def _render_builtin(self, text: str, profile: RenderProfile) -> RenderResult:
+        blocks, parse_errors = self._builtin_backend.render_blocks(text, profile)
+        html_chunks = self._chunk_blocks(blocks)
+        if not html_chunks:
+            html_chunks = [html.escape(text, quote=False)]
+        disable_preview = self._disable_preview()
+        items = [
+            RenderedText(
+                text=chunk,
+                parse_mode="HTML",
+                entities=None,
+                disable_web_page_preview=disable_preview,
+                fallback_text=self._html_to_plain_text(chunk),
+            )
+            for chunk in html_chunks
+        ]
+        return RenderResult(
+            items=items,
+            render_mode="html",
+            parse_errors=parse_errors,
+        )
+
+    async def _render_telegramify(self, text: str, profile: RenderProfile) -> RenderResult:
+        self._configure_telegramify_runtime()
+        if profile == RenderProfile.ASSISTANT_FINAL:
+            return await self._render_telegramify_final(text)
+        return self._render_telegramify_text_only(text)
+
+    def _render_telegramify_text_only(self, text: str) -> RenderResult:
+        plain_text, entities = self._telegramify_convert(text)
+        chunks = self._telegramify_split_entities(plain_text, entities, self.max_chunk_chars)
+        disable_preview = self._disable_preview()
+        items = [
+            RenderedText(
+                text=chunk_text,
+                parse_mode=None,
+                entities=self._to_aiogram_entities(chunk_entities),
+                disable_web_page_preview=disable_preview,
+                fallback_text=chunk_text,
+            )
+            for chunk_text, chunk_entities in chunks
+            if chunk_text.strip()
+        ]
+        if not items:
+            items = [
+                RenderedText(
+                    text=plain_text or text,
+                    parse_mode=None,
+                    entities=self._to_aiogram_entities(entities),
+                    disable_web_page_preview=disable_preview,
+                    fallback_text=plain_text or text,
+                )
+            ]
+        return RenderResult(
+            items=items,
+            render_mode="telegramify",
+            parse_errors=0,
+        )
+
+    async def _render_telegramify_final(self, text: str) -> RenderResult:
+        content_items = await self._telegramify_render(text, self.max_chunk_chars)
+        disable_preview = self._disable_preview()
+        items: list[RenderedItem] = []
+        for item in content_items:
+            content_type = getattr(getattr(item, "content_type", None), "value", "")
+            if content_type == "text":
+                items.append(
+                    RenderedText(
+                        text=item.text,
+                        parse_mode=None,
+                        entities=self._to_aiogram_entities(item.entities),
+                        disable_web_page_preview=disable_preview,
+                        fallback_text=item.text,
+                    )
+                )
+                continue
+            if content_type == "file":
+                items.append(
+                    RenderedFile(
+                        file_name=item.file_name,
+                        file_data=item.file_data,
+                        caption_text=item.caption_text or "",
+                        caption_entities=self._to_aiogram_entities(item.caption_entities),
+                        disable_web_page_preview=disable_preview,
+                        fallback_text=text,
+                    )
+                )
+                continue
+            if content_type == "photo":
+                items.append(
+                    RenderedPhoto(
+                        file_name=item.file_name,
+                        file_data=item.file_data,
+                        caption_text=item.caption_text or "",
+                        caption_entities=self._to_aiogram_entities(item.caption_entities),
+                        disable_web_page_preview=disable_preview,
+                        fallback_text=text,
+                    )
+                )
+        if not items:
+            return self._render_plain(text, render_mode="telegramify_empty", parse_errors=0)
+        return RenderResult(
+            items=items,
+            render_mode="telegramify",
+            parse_errors=0,
+        )
 
     def _render_plain(self, text: str, render_mode: str, parse_errors: int) -> RenderResult:
-        chunks = []
-        disable_preview = True if self.link_preview_policy == "off" else None
+        disable_preview = self._disable_preview()
+        items: list[RenderedItem] = []
         for chunk in self._split_plain_chunks(text):
-            chunks.append(
-                RenderedChunk(
+            items.append(
+                RenderedText(
                     text=chunk,
                     parse_mode=None,
+                    entities=None,
                     disable_web_page_preview=disable_preview,
                     fallback_text=chunk,
                 )
             )
-        return RenderResult(chunks=chunks, render_mode=render_mode, parse_errors=parse_errors)
+        return RenderResult(items=items, render_mode=render_mode, parse_errors=parse_errors)
 
     def _split_plain_chunks(self, text: str) -> list[str]:
         if len(text) <= self.max_chunk_chars:
@@ -499,6 +608,9 @@ class TelegramMessageRenderer:
             start = end
         return [part for part in parts if part]
 
+    def _disable_preview(self) -> Optional[bool]:
+        return True if self.link_preview_policy == "off" else None
+
     @staticmethod
     def _sanitize_text(text: str) -> str:
         normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n")
@@ -513,3 +625,48 @@ class TelegramMessageRenderer:
         plain = html.unescape(plain)
         plain = re.sub(r"\n{3,}", "\n\n", plain).strip()
         return plain or "Codex 没有返回可展示内容。"
+
+    @staticmethod
+    def _to_aiogram_entities(entities: Optional[list[object]]) -> Optional[list[MessageEntity]]:
+        if not entities:
+            return None
+        converted: list[MessageEntity] = []
+        for entity in entities:
+            if isinstance(entity, MessageEntity):
+                converted.append(entity)
+                continue
+            payload = entity.to_dict() if hasattr(entity, "to_dict") else entity
+            converted.append(MessageEntity.model_validate(payload))
+        return converted or None
+
+    @staticmethod
+    def _configure_telegramify_runtime() -> None:
+        from telegramify_markdown.config import get_runtime_config
+
+        cfg = get_runtime_config()
+        cfg.markdown_symbol.heading_level_1 = ""
+        cfg.markdown_symbol.heading_level_2 = ""
+        cfg.markdown_symbol.heading_level_3 = ""
+        cfg.markdown_symbol.heading_level_4 = ""
+
+    @staticmethod
+    def _telegramify_convert(text: str) -> tuple[str, list[object]]:
+        from telegramify_markdown import convert
+
+        return convert(text)
+
+    @staticmethod
+    def _telegramify_split_entities(
+        text: str,
+        entities: list[object],
+        max_utf16_len: int,
+    ) -> list[tuple[str, list[object]]]:
+        from telegramify_markdown import split_entities
+
+        return split_entities(text, entities, max_utf16_len=max_utf16_len)
+
+    @staticmethod
+    async def _telegramify_render(text: str, max_message_length: int) -> list[object]:
+        from telegramify_markdown import telegramify
+
+        return await telegramify(text, max_message_length=max_message_length)

@@ -131,9 +131,9 @@ def parse_link_preview_policy(raw: Optional[str]) -> LinkPreviewPolicy:
 
 
 def parse_formatting_backend(raw: Optional[str]) -> FormattingBackend:
-    value = (raw or "builtin").strip().lower()
+    value = (raw or "telegramify").strip().lower()
     if value not in ("builtin", "telegramify", "sulguk"):
-        value = "builtin"
+        value = "telegramify"
     return cast(FormattingBackend, value)
 
 
@@ -213,5 +213,5 @@ def load_config() -> AppConfig:
         tg_formatting_mode=parse_formatting_mode(env("TG_FORMATTING_MODE", "html")),
         tg_link_preview_policy=parse_link_preview_policy(env("TG_LINK_PREVIEW_POLICY", "auto")),
         tg_formatting_fail_open=parse_bool(env("TG_FORMATTING_FAIL_OPEN", "1"), True),
-        tg_formatting_backend=parse_formatting_backend(env("TG_FORMATTING_BACKEND", "builtin")),
+        tg_formatting_backend=parse_formatting_backend(env("TG_FORMATTING_BACKEND", "telegramify")),
     )

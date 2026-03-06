@@ -85,10 +85,12 @@ async def run() -> None:
         request_retry_base_ms=config.tg_http_retry_base_ms,
         request_retry_max_ms=config.tg_http_retry_max_ms,
     )
+    formatting_backend = config.tg_formatting_backend
     if os.getenv("TG_FORMATTING_FINAL_ONLY") is not None:
         log("[warn] TG_FORMATTING_FINAL_ONLY is deprecated and ignored; formatting now follows TG_FORMATTING_ENABLED only")
-    if os.getenv("TG_FORMATTING_BACKEND") is not None and config.tg_formatting_backend != "builtin":
-        log("[warn] TG_FORMATTING_BACKEND is deprecated; builtin renderer will be used")
+    if formatting_backend == "sulguk":
+        log("[warn] TG_FORMATTING_BACKEND=sulguk is not implemented; fallback to builtin")
+        formatting_backend = "builtin"
     renderer = TelegramMessageRenderer(
         enabled=config.tg_formatting_enabled,
         final_only=False,
@@ -96,7 +98,7 @@ async def run() -> None:
         mode=config.tg_formatting_mode,
         link_preview_policy=config.tg_link_preview_policy,
         fail_open=config.tg_formatting_fail_open,
-        backend="builtin",
+        backend=formatting_backend,
     )
 
     session_stores = {
@@ -134,7 +136,7 @@ async def run() -> None:
         f"style={config.tg_formatting_style}, mode={config.tg_formatting_mode}, "
         f"link_preview={config.tg_link_preview_policy}, "
         f"fail_open={str(config.tg_formatting_fail_open).lower()}, "
-        "backend=builtin)"
+        f"backend={formatting_backend})"
     )
     if config.allowed_cwd_roots:
         roots = ", ".join(str(path) for path in config.allowed_cwd_roots)

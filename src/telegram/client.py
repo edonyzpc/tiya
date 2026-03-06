@@ -9,7 +9,15 @@ from aiogram.exceptions import (
     TelegramRetryAfter,
     TelegramServerError,
 )
-from aiogram.types import BotCommand, InlineKeyboardMarkup, LinkPreviewOptions, MenuButtonCommands, Message, MessageEntity
+from aiogram.types import (
+    BotCommand,
+    BufferedInputFile,
+    InlineKeyboardMarkup,
+    LinkPreviewOptions,
+    MenuButtonCommands,
+    Message,
+    MessageEntity,
+)
 
 from ..logging_utils import log
 
@@ -150,6 +158,60 @@ class TelegramClient:
             )
 
         return await self._call_with_retries("sendMessage", _call)
+
+    async def send_document(
+        self,
+        chat_id: int,
+        file_name: str,
+        file_data: bytes,
+        caption_text: Optional[str] = None,
+        caption_entities: Optional[list[MessageEntity]] = None,
+        reply_to: Optional[int] = None,
+        reply_markup: Optional[Any] = None,
+        message_thread_id: Optional[int] = None,
+    ) -> Message:
+        markup = self._normalize_markup(reply_markup)
+        document = BufferedInputFile(file=file_data, filename=file_name)
+
+        async def _call() -> Message:
+            return await self.bot.send_document(
+                chat_id=chat_id,
+                document=document,
+                caption=caption_text,
+                caption_entities=caption_entities,
+                reply_to_message_id=reply_to,
+                reply_markup=markup,
+                message_thread_id=message_thread_id,
+            )
+
+        return await self._call_with_retries("sendDocument", _call)
+
+    async def send_photo(
+        self,
+        chat_id: int,
+        file_name: str,
+        file_data: bytes,
+        caption_text: Optional[str] = None,
+        caption_entities: Optional[list[MessageEntity]] = None,
+        reply_to: Optional[int] = None,
+        reply_markup: Optional[Any] = None,
+        message_thread_id: Optional[int] = None,
+    ) -> Message:
+        markup = self._normalize_markup(reply_markup)
+        photo = BufferedInputFile(file=file_data, filename=file_name)
+
+        async def _call() -> Message:
+            return await self.bot.send_photo(
+                chat_id=chat_id,
+                photo=photo,
+                caption=caption_text,
+                caption_entities=caption_entities,
+                reply_to_message_id=reply_to,
+                reply_markup=markup,
+                message_thread_id=message_thread_id,
+            )
+
+        return await self._call_with_retries("sendPhoto", _call)
 
     async def send_message_draft(
         self,

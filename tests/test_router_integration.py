@@ -16,6 +16,8 @@ class FakeTelegramClient:
     def __init__(self):
         self.send_message_calls = []
         self.send_message_with_result_calls = []
+        self.send_document_calls = []
+        self.send_photo_calls = []
         self.send_message_draft_calls = []
         self.edit_message_text_calls = []
         self.delete_message_calls = []
@@ -65,9 +67,60 @@ class FakeTelegramClient:
                 "text": text,
                 "reply_to": reply_to,
                 "parse_mode": parse_mode,
+                "entities": entities,
             }
         )
         return SimpleNamespace(message_id=777)
+
+    async def send_document(
+        self,
+        chat_id,
+        file_name,
+        file_data,
+        caption_text=None,
+        caption_entities=None,
+        reply_to=None,
+        reply_markup=None,
+        message_thread_id=None,
+    ):
+        self.send_document_calls.append(
+            {
+                "chat_id": chat_id,
+                "file_name": file_name,
+                "file_data": file_data,
+                "caption_text": caption_text,
+                "caption_entities": caption_entities,
+                "reply_to": reply_to,
+                "reply_markup": reply_markup,
+                "message_thread_id": message_thread_id,
+            }
+        )
+        return SimpleNamespace(message_id=778)
+
+    async def send_photo(
+        self,
+        chat_id,
+        file_name,
+        file_data,
+        caption_text=None,
+        caption_entities=None,
+        reply_to=None,
+        reply_markup=None,
+        message_thread_id=None,
+    ):
+        self.send_photo_calls.append(
+            {
+                "chat_id": chat_id,
+                "file_name": file_name,
+                "file_data": file_data,
+                "caption_text": caption_text,
+                "caption_entities": caption_entities,
+                "reply_to": reply_to,
+                "reply_markup": reply_markup,
+                "message_thread_id": message_thread_id,
+            }
+        )
+        return SimpleNamespace(message_id=779)
 
     async def send_message_draft(
         self,
@@ -253,7 +306,7 @@ def _build_service(
         mode="html",
         link_preview_policy="auto",
         fail_open=True,
-        backend="builtin",
+        backend="telegramify",
     )
 
     service = TgCodexService(
@@ -316,7 +369,8 @@ async def test_help_command_via_feed_update(bot: Bot, tmp_path: Path, session_ro
     assert api.send_message_calls
     assert "可用命令" in api.send_message_calls[-1]["text"]
     assert "/provider" in api.send_message_calls[-1]["text"]
-    assert api.send_message_calls[-1]["parse_mode"] == "HTML"
+    assert api.send_message_calls[-1]["parse_mode"] is None
+    assert api.send_message_calls[-1]["entities"]
     await service.shutdown()
 
 
@@ -414,7 +468,7 @@ async def test_allowlist_block_applies_to_provider_commands(
 
 
 @pytest.mark.asyncio
-async def test_status_and_history_use_rendered_html(bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]):
+async def test_status_and_history_use_rendered_entities(bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]):
     service, api, _, _, _ = _build_service(tmp_path, session_roots)
     dp = Dispatcher()
     dp.include_router(build_router(service))
@@ -425,10 +479,10 @@ async def test_status_and_history_use_rendered_html(bot: Bot, tmp_path: Path, se
     assert len(api.send_message_calls) >= 2
     status_msg = api.send_message_calls[-2]
     history_msg = api.send_message_calls[-1]
-    assert status_msg["parse_mode"] == "HTML"
-    assert history_msg["parse_mode"] == "HTML"
-    assert "<b>" in status_msg["text"]
-    assert "<b>" in history_msg["text"]
+    assert status_msg["parse_mode"] is None
+    assert history_msg["parse_mode"] is None
+    assert status_msg["entities"]
+    assert history_msg["entities"]
     await service.shutdown()
 
 

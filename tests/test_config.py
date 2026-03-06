@@ -56,7 +56,7 @@ def test_load_config_defaults(monkeypatch, tmp_path: Path):
     assert config.tg_formatting_mode == "html"
     assert config.tg_link_preview_policy == "auto"
     assert config.tg_formatting_fail_open is True
-    assert config.tg_formatting_backend == "builtin"
+    assert config.tg_formatting_backend == "telegramify"
 
 
 def test_resolve_tg_proxy_precedence(monkeypatch):

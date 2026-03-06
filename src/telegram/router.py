@@ -12,6 +12,7 @@ from ..services.runner_protocol import RunnerProtocol
 from ..services.session_store import AsyncSessionStoreProtocol, CodexSessionStore
 from ..services.state_store import StateStore
 from .client import TelegramClient
+from .render_dispatch import send_render_result
 from .rendering import RenderProfile, TelegramMessageRenderer
 from .streaming import StreamOrchestrator, TypingStatus
 
@@ -181,37 +182,21 @@ class TgCodexService:
             await self.api.send_message(chat_id, text, reply_to=reply_to, reply_markup=reply_markup)
             return
 
-        render_result = self.renderer.render_text(text, profile)
-        fallback_count = 0
-        total = len(render_result.chunks)
-        for idx, chunk in enumerate(render_result.chunks):
-            attach_reply_to = reply_to if idx == 0 else None
-            attach_markup = reply_markup if idx == total - 1 else None
-            try:
-                await self.api.send_message(
-                    chat_id=chat_id,
-                    text=chunk.text,
-                    reply_to=attach_reply_to,
-                    reply_markup=attach_markup,
-                    parse_mode=chunk.parse_mode,
-                    disable_web_page_preview=chunk.disable_web_page_preview,
-                )
-            except Exception as exc:
-                fallback_count += 1
-                if not self.renderer.fail_open:
-                    raise
-                log(f"rendered message fallback: profile={profile.value} err={exc}")
-                await self.api.send_message(
-                    chat_id=chat_id,
-                    text=chunk.fallback_text,
-                    reply_to=attach_reply_to,
-                    reply_markup=attach_markup,
-                    disable_web_page_preview=chunk.disable_web_page_preview,
-                )
+        render_result = await self.renderer.render_text(text, profile)
+        stats = await send_render_result(
+            api=self.api,
+            chat_id=chat_id,
+            render_result=render_result,
+            reply_to=reply_to,
+            reply_markup=reply_markup,
+            fail_open=self.renderer.fail_open,
+            log_prefix=f"rendered message fallback: profile={profile.value}",
+        )
         log(
             "render summary: "
             f"profile={profile.value} mode={render_result.render_mode} "
-            f"chunks={total} fallback_chunks={fallback_count} parse_errors={render_result.parse_errors}"
+            f"chunks={stats.total_items} fallback_chunks={stats.fallback_items} "
+            f"parse_errors={render_result.parse_errors}"
         )
 
     async def _send_help(self, chat_id: int, reply_to: int) -> None:

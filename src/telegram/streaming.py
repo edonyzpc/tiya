@@ -5,6 +5,7 @@ from typing import Optional
 from ..domain.models import StreamConfig, StreamSummary
 from ..logging_utils import log
 from .client import MAX_TELEGRAM_TEXT, TelegramClient
+from .render_dispatch import send_render_result
 from .rendering import RenderProfile, TelegramMessageRenderer
 
 
@@ -681,34 +682,20 @@ class StreamOrchestrator:
         if self.renderer is None:
             await self.api.send_message(self.chat_id, final_text, reply_to=reply_to)
         else:
-            render_result = self.renderer.render_text(final_text, RenderProfile.ASSISTANT_FINAL)
-            fallback_count = 0
-            total = len(render_result.chunks)
-            for idx, chunk in enumerate(render_result.chunks):
-                attach_reply_to = reply_to if idx == 0 else None
-                try:
-                    await self.api.send_message(
-                        chat_id=self.chat_id,
-                        text=chunk.text,
-                        reply_to=attach_reply_to,
-                        parse_mode=chunk.parse_mode,
-                        disable_web_page_preview=chunk.disable_web_page_preview,
-                    )
-                except Exception as exc:
-                    fallback_count += 1
-                    if not self.renderer.fail_open:
-                        raise
-                    log(f"final render fallback: err={exc}")
-                    await self.api.send_message(
-                        chat_id=self.chat_id,
-                        text=chunk.fallback_text,
-                        reply_to=attach_reply_to,
-                        disable_web_page_preview=chunk.disable_web_page_preview,
-                    )
+            render_result = await self.renderer.render_text(final_text, RenderProfile.ASSISTANT_FINAL)
+            stats = await send_render_result(
+                api=self.api,
+                chat_id=self.chat_id,
+                render_result=render_result,
+                reply_to=reply_to,
+                fail_open=self.renderer.fail_open,
+                log_prefix="final render fallback",
+            )
             log(
                 "final render summary: "
                 f"mode={render_result.render_mode} "
-                f"chunks={total} fallback_chunks={fallback_count} parse_errors={render_result.parse_errors}"
+                f"chunks={stats.total_items} fallback_chunks={stats.fallback_items} "
+                f"parse_errors={render_result.parse_errors}"
             )
         self.final_send_ms = int((time.monotonic() - send_started) * 1000)
         self.state = "FAILED" if failed else "DONE"

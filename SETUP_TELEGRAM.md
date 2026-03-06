@@ -55,6 +55,7 @@ export TG_STREAM_PREVIEW_FAILFAST=1
 export TG_FORMATTING_ENABLED=1
 export TG_FORMATTING_STYLE="strong"         # light | medium | strong
 export TG_FORMATTING_MODE="html"            # html | plain
+export TG_FORMATTING_BACKEND="telegramify"  # telegramify | builtin | sulguk(fallback to builtin)
 export TG_LINK_PREVIEW_POLICY="auto"        # auto | off
 export TG_FORMATTING_FAIL_OPEN=1
 
@@ -110,7 +111,10 @@ uv run restart
 
 - Polling mode only.
 - Legacy variable `TELEGRAM_ENABLE_DRAFT_STREAM` is still supported as fallback.
-- `TG_FORMATTING_FINAL_ONLY` and `TG_FORMATTING_BACKEND` are deprecated and ignored.
+- `TG_FORMATTING_FINAL_ONLY` is deprecated and ignored.
+- `TG_FORMATTING_BACKEND` is active. Default is `telegramify`; `sulguk` currently falls back to `builtin`.
+- Markdown tables are rendered as monospace text blocks, not Telegram native tables.
+- Final assistant replies may send code blocks as files and Mermaid diagrams as photos.
 - `run.sh` has been removed. Use `uv run <command>`.
 - Use `uv run start` as the only startup entry. Avoid extra polling process for the same token (for example `python -m tg_codex`).
 - macOS support follows the same CLI lifecycle as Linux. `launchd` integration is not included in this release.
