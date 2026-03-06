@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 from aiogram import Bot, Dispatcher
 
-from src.domain.models import AgentRunResult, StreamConfig
+from src.domain.models import AgentRunResult, ApprovalRequest, StreamConfig
 from src.services.session_store import AsyncSessionStore, ClaudeSessionStore, CodexSessionStore
 from src.services.state_store import StateStore
 from src.telegram.rendering import TelegramMessageRenderer
@@ -203,13 +203,25 @@ class FakeRunner:
             return_code=0,
         )
 
-    async def run_prompt(self, prompt, cwd, session_id=None, images=(), on_partial=None, on_reasoning=None):
+    async def run_prompt(
+        self,
+        prompt,
+        cwd,
+        session_id=None,
+        images=(),
+        on_partial=None,
+        on_reasoning=None,
+        interaction_handler=None,
+        cancel_event=None,
+    ):
         self.calls.append(
             {
                 "prompt": prompt,
                 "cwd": str(cwd),
                 "session_id": session_id,
                 "images": list(images),
+                "interaction_handler": interaction_handler,
+                "cancel_event": cancel_event,
             }
         )
         if on_reasoning is not None:
@@ -743,4 +755,39 @@ async def test_new_rejects_cwd_outside_allowed_roots(bot: Bot, tmp_path: Path, s
 
     assert api.send_message_calls
     assert "不在允许范围内" in api.send_message_calls[-1]["text"]
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_request_approval_send_failure_cleans_pending_interaction(
+    tmp_path: Path,
+    session_roots: tuple[Path, Path],
+):
+    service, api, state, _, _ = _build_service(tmp_path, session_roots)
+    run = await service.interactions.start_run(user_id=1, provider="codex", chat_id=101, chat_type="private")
+    assert run is not None
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("send failed")
+
+    api.send_message_with_result = _boom  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="send failed"):
+        await service._request_approval(
+            chat_id=101,
+            reply_to=11,
+            user_id=1,
+            provider="codex",
+            chat_type="private",
+            request=ApprovalRequest(
+                kind="command",
+                title="Need approval",
+                body="Run a command",
+                command="pwd",
+            ),
+        )
+
+    assert await service.interactions.get_pending_interaction(1, "codex") is None
+    assert await state.get_pending_interaction(1, provider="codex") is None
+    await service.interactions.finish_run(1, "codex", run.run_id)
     await service.shutdown()
