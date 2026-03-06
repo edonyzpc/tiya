@@ -5,11 +5,11 @@ from types import SimpleNamespace
 import pytest
 from aiogram import Bot, Dispatcher
 
-from domain.models import AgentRunResult
-from services.session_store import ClaudeSessionStore, CodexSessionStore
-from services.state_store import StateStore
-from telegram.rendering import TelegramMessageRenderer
-from telegram.router import TgCodexService, build_router
+from src.domain.models import AgentRunResult, StreamConfig
+from src.services.session_store import AsyncSessionStore, ClaudeSessionStore, CodexSessionStore
+from src.services.state_store import StateStore
+from src.telegram.rendering import TelegramMessageRenderer
+from src.telegram.router import TgCodexService, build_router
 
 
 class FakeTelegramClient:
@@ -239,11 +239,12 @@ def _build_service(
     tmp_path: Path,
     session_roots: tuple[Path, Path],
     allowed_user_ids=None,
+    allowed_cwd_roots: tuple[Path, ...] = (),
 ):
     api = FakeTelegramClient()
     codex_runner = FakeRunner("codex")
     claude_runner = FakeRunner("claude")
-    state = StateStore(tmp_path / "state.json", default_provider="codex")
+    state = StateStore(tmp_path / "state.json", default_provider="codex", flush_delay_sec=0.01)
     codex_root, claude_root = session_roots
     renderer = TelegramMessageRenderer(
         enabled=True,
@@ -258,8 +259,8 @@ def _build_service(
     service = TgCodexService(
         api=api,
         session_stores={
-            "codex": CodexSessionStore(codex_root),
-            "claude": ClaudeSessionStore(claude_root),
+            "codex": AsyncSessionStore(CodexSessionStore(codex_root)),
+            "claude": AsyncSessionStore(ClaudeSessionStore(claude_root)),
         },
         state=state,
         runners={
@@ -272,13 +273,16 @@ def _build_service(
         },
         default_cwd=tmp_path,
         allowed_user_ids=allowed_user_ids,
-        stream_enabled=False,
-        stream_edit_interval_ms=700,
-        stream_min_delta_chars=8,
-        thinking_status_interval_ms=900,
-        stream_retry_cooldown_ms=15000,
-        stream_max_consecutive_preview_errors=2,
-        stream_preview_failfast=True,
+        allowed_cwd_roots=allowed_cwd_roots,
+        stream_config=StreamConfig(
+            enabled=False,
+            edit_interval_ms=700,
+            min_delta_chars=8,
+            thinking_status_interval_ms=900,
+            retry_cooldown_ms=15000,
+            max_consecutive_preview_errors=2,
+            preview_failfast=True,
+        ),
         renderer=renderer,
     )
     return service, api, state, codex_runner, claude_runner
@@ -313,6 +317,7 @@ async def test_help_command_via_feed_update(bot: Bot, tmp_path: Path, session_ro
     assert "可用命令" in api.send_message_calls[-1]["text"]
     assert "/provider" in api.send_message_calls[-1]["text"]
     assert api.send_message_calls[-1]["parse_mode"] == "HTML"
+    await service.shutdown()
 
 
 @pytest.mark.asyncio
@@ -322,7 +327,7 @@ async def test_provider_switch_and_runner_dispatch(bot: Bot, tmp_path: Path, ses
     dp.include_router(build_router(service))
 
     await _feed(dp, bot, _message_update(1, "/provider claude"))
-    assert state.get_active_provider(1) == "claude"
+    assert await state.get_active_provider(1) == "claude"
 
     await _feed(dp, bot, _message_update(2, "hello from claude", message_id=12))
     assert len(claude_runner.calls) == 1
@@ -331,7 +336,8 @@ async def test_provider_switch_and_runner_dispatch(bot: Bot, tmp_path: Path, ses
     await _feed(dp, bot, _message_update(3, "/provider codex", message_id=13))
     await _feed(dp, bot, _message_update(4, "hello from codex", message_id=14))
     assert len(codex_runner.calls) == 1
-    assert state.get_active_provider(1) == "codex"
+    assert await state.get_active_provider(1) == "codex"
+    await service.shutdown()
 
 
 @pytest.mark.asyncio
@@ -343,7 +349,7 @@ async def test_sessions_and_callback_switch_are_provider_aware(
     dp.include_router(build_router(service))
 
     await _feed(dp, bot, _message_update(1, "/sessions 1"))
-    assert state.get_last_session_ids(1, provider="codex") == ["session-1"]
+    assert await state.get_last_session_ids(1, provider="codex") == ["session-1"]
 
     await _feed(
         dp,
@@ -364,20 +370,21 @@ async def test_sessions_and_callback_switch_are_provider_aware(
             },
         },
     )
-    assert state.get_active(1, provider="codex")[0] == "session-1"
+    assert (await state.get_active(1, provider="codex"))[0] == "session-1"
     assert api.answer_callback_query_calls
 
     await _feed(dp, bot, _message_update(3, "/provider claude", message_id=14))
     await _feed(dp, bot, _message_update(4, "/sessions 1", message_id=15))
-    claude_ids = state.get_last_session_ids(1, provider="claude")
+    claude_ids = await state.get_last_session_ids(1, provider="claude")
     assert len(claude_ids) == 1
     assert claude_ids[0] == "925ffdad-54ba-41ed-8e3b-a7e72843079c"
+    await service.shutdown()
 
 
 @pytest.mark.asyncio
 async def test_continue_and_new_session_paths(bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]):
     service, _, state, codex_runner, _ = _build_service(tmp_path, session_roots)
-    state.set_active_session(1, "existing-session", str(tmp_path), provider="codex")
+    await state.set_active_session(1, "existing-session", str(tmp_path), provider="codex")
     dp = Dispatcher()
     dp.include_router(build_router(service))
 
@@ -387,6 +394,7 @@ async def test_continue_and_new_session_paths(bot: Bot, tmp_path: Path, session_
     await _feed(dp, bot, _message_update(2, "/new", message_id=22))
     await _feed(dp, bot, _message_update(3, "new prompt", message_id=23))
     assert codex_runner.calls[-1]["session_id"] is None
+    await service.shutdown()
 
 
 @pytest.mark.asyncio
@@ -402,6 +410,7 @@ async def test_allowlist_block_applies_to_provider_commands(
     assert "没有权限" in api.send_message_calls[-1]["text"]
     assert codex_runner.calls == []
     assert claude_runner.calls == []
+    await service.shutdown()
 
 
 @pytest.mark.asyncio
@@ -420,3 +429,24 @@ async def test_status_and_history_use_rendered_html(bot: Bot, tmp_path: Path, se
     assert history_msg["parse_mode"] == "HTML"
     assert "<b>" in status_msg["text"]
     assert "<b>" in history_msg["text"]
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_new_rejects_cwd_outside_allowed_roots(bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]):
+    service, api, _, _, _ = _build_service(
+        tmp_path,
+        session_roots,
+        allowed_cwd_roots=(tmp_path / "allowed",),
+    )
+    (tmp_path / "allowed").mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    dp = Dispatcher()
+    dp.include_router(build_router(service))
+
+    await _feed(dp, bot, _message_update(1, f"/new {outside}", message_id=31))
+
+    assert api.send_message_calls
+    assert "不在允许范围内" in api.send_message_calls[-1]["text"]
+    await service.shutdown()

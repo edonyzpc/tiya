@@ -3,8 +3,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from telegram.rendering import TelegramMessageRenderer
-from telegram.streaming import StreamOrchestrator
+from src.domain.models import StreamConfig
+from src.telegram.rendering import TelegramMessageRenderer
+from src.telegram.streaming import StreamOrchestrator
 
 
 class FakeRetryAfterError(RuntimeError):
@@ -130,6 +131,7 @@ class TestStreamOrchestrator:
         api: FakeTelegramClient,
         enabled: bool = True,
         retry_cooldown_ms: int = 800,
+        min_delta_chars: int = 8,
         renderer: TelegramMessageRenderer | None = None,
     ) -> StreamOrchestrator:
         return StreamOrchestrator(
@@ -137,12 +139,15 @@ class TestStreamOrchestrator:
             chat_id=123,
             reply_to=999,
             stream_enabled=enabled,
-            stream_edit_interval_ms=200,
-            stream_min_delta_chars=8,
-            thinking_status_interval_ms=5000,
-            retry_cooldown_ms=retry_cooldown_ms,
-            max_consecutive_preview_errors=2,
-            preview_failfast=True,
+            stream_config=StreamConfig(
+                enabled=enabled,
+                edit_interval_ms=200,
+                min_delta_chars=min_delta_chars,
+                thinking_status_interval_ms=5000,
+                retry_cooldown_ms=retry_cooldown_ms,
+                max_consecutive_preview_errors=2,
+                preview_failfast=True,
+            ),
             renderer=renderer,
         )
 
@@ -214,7 +219,7 @@ class TestStreamOrchestrator:
         orchestrator = self._orchestrator(api, enabled=True)
         await orchestrator.start()
         await orchestrator.on_partial("x" * 40)
-        await orchestrator.on_partial("x" * 41)
+        await orchestrator.on_partial("x" * 52)
         await asyncio.sleep(0.05)
         await orchestrator.finalize_success("final answer", reply_to=999)
 
@@ -246,6 +251,20 @@ class TestStreamOrchestrator:
         assert orchestrator.preview_errors_total >= 1
         assert orchestrator.degraded_reason == "preview_retry_after_threshold"
         assert len(api.send_message_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_stream_min_delta_chars_suppresses_small_preview_updates(self):
+        api = FakeTelegramClient(draft_fail=False)
+        orchestrator = self._orchestrator(api, enabled=True, min_delta_chars=10)
+        await orchestrator.start()
+        await orchestrator.on_partial("hello world")
+        await asyncio.sleep(0.25)
+        first_updates = len(api.send_message_draft_calls)
+        await orchestrator.on_partial("hello world!")
+        await asyncio.sleep(0.25)
+        await orchestrator.finalize_success("final answer", reply_to=999)
+
+        assert len(api.send_message_draft_calls) == first_updates
 
     @pytest.mark.asyncio
     async def test_final_render_uses_html_parse_mode(self):

@@ -1,4 +1,4 @@
-from telegram.rendering import RenderProfile, TelegramMessageRenderer
+from src.telegram.rendering import RenderProfile, TelegramMessageRenderer
 
 
 def _renderer(**kwargs) -> TelegramMessageRenderer:
@@ -66,3 +66,22 @@ def test_link_preview_policy_off_sets_disable_web_page_preview():
 
     assert result.chunks
     assert all(chunk.disable_web_page_preview is True for chunk in result.chunks)
+
+
+def test_snake_case_does_not_trigger_double_underscore_bold():
+    renderer = _renderer()
+    result = renderer.render_text("变量名 hello_world_test 应保持原样", RenderProfile.ASSISTANT_FINAL)
+
+    assert result.chunks
+    assert "hello_world_test" in result.chunks[0].text
+    assert "<b>world</b>" not in result.chunks[0].text
+
+
+def test_long_inline_html_chunks_remain_valid():
+    renderer = _renderer(max_chunk_chars=140)
+    text = ("**very long text** " * 40).strip()
+
+    result = renderer.render_text(text, RenderProfile.ASSISTANT_FINAL)
+
+    assert len(result.chunks) > 1
+    assert all(chunk.text.count("<b>") == chunk.text.count("</b>") for chunk in result.chunks)

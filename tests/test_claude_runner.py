@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from services.claude_runner import ClaudeRunner
+from src.services.claude_runner import ClaudeRunner
 
 
 class _FakeStream:
@@ -45,7 +45,7 @@ async def test_run_prompt_stream_extracts_session_partial_and_reasoning(monkeypa
     async def _fake_create(*args, **kwargs):
         return proc
 
-    monkeypatch.setattr("services.claude_runner.asyncio.create_subprocess_exec", _fake_create)
+    monkeypatch.setattr("src.services.claude_runner.asyncio.create_subprocess_exec", _fake_create)
 
     partials: list[str] = []
     reasoning: list[str] = []
@@ -79,7 +79,7 @@ async def test_run_prompt_resume_uses_r_flag(monkeypatch, tmp_path: Path):
         captured_args.extend([str(v) for v in args])
         return proc
 
-    monkeypatch.setattr("services.claude_runner.asyncio.create_subprocess_exec", _fake_create)
+    monkeypatch.setattr("src.services.claude_runner.asyncio.create_subprocess_exec", _fake_create)
 
     runner = ClaudeRunner(claude_bin="claude", model="sonnet", permission_mode="default")
     result = await runner.run_prompt("hello", tmp_path, session_id="resume-sid")
@@ -101,7 +101,7 @@ async def test_run_prompt_non_zero_exit_uses_merged_output(monkeypatch, tmp_path
     async def _fake_create(*args, **kwargs):
         return proc
 
-    monkeypatch.setattr("services.claude_runner.asyncio.create_subprocess_exec", _fake_create)
+    monkeypatch.setattr("src.services.claude_runner.asyncio.create_subprocess_exec", _fake_create)
 
     runner = ClaudeRunner(claude_bin="claude")
     result = await runner.run_prompt("hi", tmp_path)
@@ -116,7 +116,7 @@ async def test_run_prompt_handles_missing_binary(monkeypatch, tmp_path: Path):
     async def _fake_create(*args, **kwargs):
         raise FileNotFoundError("not found")
 
-    monkeypatch.setattr("services.claude_runner.asyncio.create_subprocess_exec", _fake_create)
+    monkeypatch.setattr("src.services.claude_runner.asyncio.create_subprocess_exec", _fake_create)
 
     runner = ClaudeRunner(claude_bin="/missing/claude")
     result = await runner.run_prompt("hi", tmp_path)
@@ -130,7 +130,7 @@ async def test_run_prompt_handles_missing_cwd(monkeypatch, tmp_path: Path):
     async def _fake_create(*args, **kwargs):
         raise FileNotFoundError(2, "No such file or directory", "tiya")
 
-    monkeypatch.setattr("services.claude_runner.asyncio.create_subprocess_exec", _fake_create)
+    monkeypatch.setattr("src.services.claude_runner.asyncio.create_subprocess_exec", _fake_create)
 
     runner = ClaudeRunner(claude_bin="claude")
     result = await runner.run_prompt("hi", tmp_path / "missing-cwd")

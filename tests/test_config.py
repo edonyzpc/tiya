@@ -2,7 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from config import load_config, parse_default_provider, resolve_tg_proxy, resolve_tg_stream_enabled
+from src.config import load_config, parse_default_provider, resolve_tg_proxy, resolve_tg_stream_enabled
+from src.runtime_paths import RuntimePaths
 
 
 def test_resolve_tg_stream_enabled_precedence(monkeypatch):
@@ -32,6 +33,7 @@ def test_load_config_defaults(monkeypatch, tmp_path: Path):
     assert config.telegram_token.startswith("123456:")
     assert config.telegram_proxy is None
     assert config.allowed_user_ids is None
+    assert config.allowed_cwd_roots == ()
     assert config.stream_enabled is True
     assert config.stream_edit_interval_ms == 700
     assert config.stream_min_delta_chars == 8
@@ -44,7 +46,7 @@ def test_load_config_defaults(monkeypatch, tmp_path: Path):
     assert config.claude_bin
     assert config.claude_model is None
     assert config.claude_permission_mode == "default"
-    assert config.tg_instance_lock_path == Path("./.runtime/bot.lock")
+    assert config.tg_instance_lock_path == RuntimePaths.for_token(config.telegram_token).lock_base
     assert config.tg_stream_retry_cooldown_ms == 15000
     assert config.tg_stream_max_consecutive_preview_errors == 2
     assert config.tg_stream_preview_failfast is True

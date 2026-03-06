@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from services.codex_runner import CodexRunner
+from src.services.codex_runner import CodexRunner
 
 
 class _FakeStream:
@@ -43,7 +43,7 @@ async def test_run_prompt_stream_extracts_thread_and_partial(monkeypatch, tmp_pa
     async def _fake_create(*args, **kwargs):
         return proc
 
-    monkeypatch.setattr("services.codex_runner.asyncio.create_subprocess_exec", _fake_create)
+    monkeypatch.setattr("src.services.codex_runner.asyncio.create_subprocess_exec", _fake_create)
 
     partials: list[str] = []
 
@@ -75,7 +75,7 @@ async def test_run_prompt_emits_reasoning_summary(monkeypatch, tmp_path: Path):
     async def _fake_create(*args, **kwargs):
         return proc
 
-    monkeypatch.setattr("services.codex_runner.asyncio.create_subprocess_exec", _fake_create)
+    monkeypatch.setattr("src.services.codex_runner.asyncio.create_subprocess_exec", _fake_create)
 
     reasoning_updates: list[str] = []
 
@@ -101,7 +101,7 @@ async def test_run_prompt_non_zero_exit_uses_merged_output(monkeypatch, tmp_path
     async def _fake_create(*args, **kwargs):
         return proc
 
-    monkeypatch.setattr("services.codex_runner.asyncio.create_subprocess_exec", _fake_create)
+    monkeypatch.setattr("src.services.codex_runner.asyncio.create_subprocess_exec", _fake_create)
 
     runner = CodexRunner(codex_bin="codex")
     result = await runner.run_prompt("hi", tmp_path)
@@ -116,7 +116,7 @@ async def test_run_prompt_handles_missing_binary(monkeypatch, tmp_path: Path):
     async def _fake_create(*args, **kwargs):
         raise FileNotFoundError("not found")
 
-    monkeypatch.setattr("services.codex_runner.asyncio.create_subprocess_exec", _fake_create)
+    monkeypatch.setattr("src.services.codex_runner.asyncio.create_subprocess_exec", _fake_create)
 
     runner = CodexRunner(codex_bin="/missing/codex")
     result = await runner.run_prompt("hi", tmp_path)
@@ -130,10 +130,40 @@ async def test_run_prompt_handles_missing_cwd(monkeypatch, tmp_path: Path):
     async def _fake_create(*args, **kwargs):
         raise FileNotFoundError(2, "No such file or directory", "tiya")
 
-    monkeypatch.setattr("services.codex_runner.asyncio.create_subprocess_exec", _fake_create)
+    monkeypatch.setattr("src.services.codex_runner.asyncio.create_subprocess_exec", _fake_create)
 
     runner = CodexRunner(codex_bin="codex")
     result = await runner.run_prompt("hi", tmp_path / "missing-cwd")
 
     assert result.return_code == 127
     assert "工作目录不存在或不可访问: tiya" in result.answer
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_stderr_timeout_does_not_hang(monkeypatch, tmp_path: Path):
+    proc = _FakeProcess(
+        stdout_lines=['{"type":"item.completed","item":{"id":"a","type":"agent_message","text":"done"}}'],
+        stderr_lines=[],
+        return_code=0,
+    )
+
+    async def _blocked_readline() -> bytes:
+        await asyncio.sleep(10)
+        return b""
+
+    proc.stderr.readline = _blocked_readline  # type: ignore[method-assign]
+
+    async def _fake_create(*args, **kwargs):
+        return proc
+
+    async def _fake_wait_for(awaitable, timeout):
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr("src.services.codex_runner.asyncio.create_subprocess_exec", _fake_create)
+    monkeypatch.setattr("src.services.codex_runner.asyncio.wait_for", _fake_wait_for)
+
+    runner = CodexRunner(codex_bin="codex")
+    result = await runner.run_prompt("hi", tmp_path)
+
+    assert result.return_code == 0
+    assert result.answer == "done"

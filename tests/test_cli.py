@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import cli
-from instance_lock import BotInstanceLock
+from src import cli
+from src.instance_lock import BotInstanceLock
+from src.runtime_paths import RuntimePaths
 
 
 def test_parse_dotenv_line_handles_export_quote_and_comment():
@@ -55,11 +56,13 @@ def test_proxy_normalization_respects_priority(monkeypatch):
 
 
 def test_proxy_is_optional(monkeypatch):
+    token = "123456:abcdefghijklmnopqrstuvwxyz12345"
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", token)
     for key in ("TG_PROXY_URL", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
         monkeypatch.delenv(key, raising=False)
 
     cli.normalize_proxy_env(cli.os.environ)
-    child_env = cli._build_child_env()
+    child_env = cli._build_child_env(RuntimePaths.for_token(token))
 
     assert "TG_PROXY_URL" not in child_env
     assert "HTTPS_PROXY" not in child_env
@@ -69,39 +72,33 @@ def test_proxy_is_optional(monkeypatch):
 
 
 def test_tg_is_running_removes_stale_pid(monkeypatch, tmp_path: Path):
-    pid_file = tmp_path / "bot.pid"
-    pid_file.write_text("99999", encoding="utf-8")
+    paths = RuntimePaths.for_instance_name(root=tmp_path, instance_name="instance-a")
+    paths.instance_dir.mkdir(parents=True, exist_ok=True)
+    paths.pid_file.write_text("99999", encoding="utf-8")
 
-    monkeypatch.setattr(cli, "PID_FILE", pid_file)
     monkeypatch.setattr(cli, "_is_pid_running", lambda pid: False)
-    monkeypatch.setattr(cli, "_find_existing_pid", lambda: None)
+    monkeypatch.setattr(cli, "_read_lock_owner_pid", lambda _paths: None)
 
-    running, pid = cli.tg_is_running()
+    running, pid = cli.tg_is_running(paths)
 
     assert running is False
     assert pid is None
-    assert not pid_file.exists()
+    assert not paths.pid_file.exists()
 
 
-def test_start_uses_new_entry_and_writes_pid(monkeypatch, tmp_path: Path):
-    runtime_dir = tmp_path / ".runtime"
-    pid_file = runtime_dir / "bot.pid"
-    log_file = runtime_dir / "bot.log"
-    state_path = runtime_dir / "bot_state.json"
-    entry_file = tmp_path / "tiya.py"
-    entry_file.write_text("print('ok')\n", encoding="utf-8")
+def test_start_uses_module_entry_and_writes_pid(monkeypatch, tmp_path: Path):
+    token = "123456:abcdefghijklmnopqrstuvwxyz12345"
+    paths = RuntimePaths.for_token(token, {"TIYA_HOME": str(tmp_path)})
 
     monkeypatch.setattr(cli, "REPO_ROOT", tmp_path)
-    monkeypatch.setattr(cli, "RUNTIME_DIR", runtime_dir)
-    monkeypatch.setattr(cli, "PID_FILE", pid_file)
-    monkeypatch.setattr(cli, "LOG_FILE", log_file)
-    monkeypatch.setattr(cli, "STATE_PATH", state_path)
-    monkeypatch.setattr(cli, "BOT_ENTRY", entry_file)
-    monkeypatch.setattr(cli, "tg_is_running", lambda: (False, None))
     monkeypatch.setattr(cli, "validate_tg_config", lambda: None)
     monkeypatch.setattr(cli, "validate_shared_config", lambda: None)
     monkeypatch.setattr(cli, "has_tg_config", lambda: True)
-    monkeypatch.setattr(cli, "_build_child_env", lambda: {"A": "B"})
+    monkeypatch.setattr(cli, "_require_runtime_paths", lambda: paths)
+    monkeypatch.setattr(cli, "_build_child_env", lambda runtime_paths: {"A": "B"})
+    monkeypatch.setattr(cli, "_probe_instance_lock", lambda env, runtime_paths: (True, ""))
+    monkeypatch.setattr(cli, "tg_is_running", lambda runtime_paths: (False, None))
+    monkeypatch.setattr(cli, "_wait_for_ready", lambda proc, runtime_paths: True)
 
     called = {}
 
@@ -116,6 +113,8 @@ def test_start_uses_new_entry_and_writes_pid(monkeypatch, tmp_path: Path):
         called["cmd"] = cmd
         called["cwd"] = cwd
         called["env"] = env
+        called["stdout"] = stdout
+        called["stderr"] = stderr
         called["start_new_session"] = start_new_session
         return _FakeProc()
 
@@ -124,32 +123,26 @@ def test_start_uses_new_entry_and_writes_pid(monkeypatch, tmp_path: Path):
     rc = cli.start()
 
     assert rc == 0
-    assert pid_file.read_text(encoding="utf-8").strip() == "43210"
-    assert called["cmd"][1] == str(entry_file)
+    assert paths.pid_file.read_text(encoding="utf-8").strip() == "43210"
+    assert called["cmd"] == [cli.sys.executable, "-m", cli.BOT_MODULE]
     assert called["cwd"] == str(tmp_path)
     assert called["start_new_session"] is True
 
 
 def test_start_rejects_when_instance_lock_is_occupied(monkeypatch, tmp_path: Path):
-    runtime_dir = tmp_path / ".runtime"
-    entry_file = tmp_path / "tiya.py"
-    entry_file.write_text("print('ok')\n", encoding="utf-8")
+    token = "123456:abcdefghijklmnopqrstuvwxyz12345"
+    paths = RuntimePaths.for_token(token, {"TIYA_HOME": str(tmp_path)})
 
-    monkeypatch.setattr(cli, "REPO_ROOT", tmp_path)
-    monkeypatch.setattr(cli, "RUNTIME_DIR", runtime_dir)
-    monkeypatch.setattr(cli, "PID_FILE", runtime_dir / "bot.pid")
-    monkeypatch.setattr(cli, "LOG_FILE", runtime_dir / "bot.log")
-    monkeypatch.setattr(cli, "STATE_PATH", runtime_dir / "bot_state.json")
-    monkeypatch.setattr(cli, "BOT_ENTRY", entry_file)
     monkeypatch.setattr(cli, "validate_tg_config", lambda: None)
     monkeypatch.setattr(cli, "validate_shared_config", lambda: None)
     monkeypatch.setattr(cli, "has_tg_config", lambda: True)
+    monkeypatch.setattr(cli, "_require_runtime_paths", lambda: paths)
     monkeypatch.setattr(
         cli,
         "_build_child_env",
-        lambda: {"TELEGRAM_BOT_TOKEN": "123456:abcdefghijklmnopqrstuvwxyz12345"},
+        lambda runtime_paths: {"TELEGRAM_BOT_TOKEN": token},
     )
-    monkeypatch.setattr(cli, "_probe_instance_lock", lambda env: (False, "occupied"))
+    monkeypatch.setattr(cli, "_probe_instance_lock", lambda env, runtime_paths: (False, "occupied"))
 
     called = {}
 
@@ -166,34 +159,34 @@ def test_start_rejects_when_instance_lock_is_occupied(monkeypatch, tmp_path: Pat
 
 
 def test_probe_instance_lock_allows_stale_lock_file(tmp_path: Path):
-    lock_path = tmp_path / ".runtime" / "bot.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path.write_text('{"pid":999999,"started_at":"old"}', encoding="utf-8")
+    token = "123456:abcdefghijklmnopqrstuvwxyz12345"
+    paths = RuntimePaths.for_instance_name(root=tmp_path, instance_name="instance-a")
+    lock = BotInstanceLock(paths.lock_base, token)
+    lock.path.parent.mkdir(parents=True, exist_ok=True)
+    lock.path.write_text('{"pid":999999,"started_at":"old"}', encoding="utf-8")
 
     env = {
-        "TELEGRAM_BOT_TOKEN": "123456:abcdefghijklmnopqrstuvwxyz12345",
-        "TG_INSTANCE_LOCK_PATH": str(lock_path),
+        "TELEGRAM_BOT_TOKEN": token,
     }
 
-    ok, msg = cli._probe_instance_lock(env)
+    ok, msg = cli._probe_instance_lock(env, paths)
 
     assert ok is True
     assert msg == ""
 
 
 def test_probe_instance_lock_rejects_when_held(tmp_path: Path):
-    lock_base = tmp_path / ".runtime" / "bot.lock"
     token = "123456:abcdefghijklmnopqrstuvwxyz12345"
-    holder = BotInstanceLock(lock_base, token)
+    paths = RuntimePaths.for_instance_name(root=tmp_path, instance_name="instance-a")
+    holder = BotInstanceLock(paths.lock_base, token)
     acquired, _ = holder.acquire()
     assert acquired is True
 
     try:
         env = {
             "TELEGRAM_BOT_TOKEN": token,
-            "TG_INSTANCE_LOCK_PATH": str(lock_base),
         }
-        ok, msg = cli._probe_instance_lock(env)
+        ok, msg = cli._probe_instance_lock(env, paths)
         assert ok is False
         assert "owner_pid=" in msg
     finally:
