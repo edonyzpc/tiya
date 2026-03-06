@@ -3,7 +3,7 @@ import shutil
 from pathlib import Path
 from typing import Optional, cast
 
-from domain.models import (
+from .domain.models import (
     AgentProvider,
     AppConfig,
     FormattingBackend,
@@ -11,6 +11,7 @@ from domain.models import (
     FormattingStyle,
     LinkPreviewPolicy,
 )
+from .runtime_paths import RuntimePaths
 
 
 def env(name: str, default: Optional[str] = None) -> Optional[str]:
@@ -34,6 +35,18 @@ def parse_allowed_user_ids(raw: Optional[str]) -> Optional[set[int]]:
         except ValueError as exc:
             raise ValueError(f"invalid user id in ALLOWED_TELEGRAM_USER_IDS: {part}") from exc
     return result
+
+
+def parse_allowed_cwd_roots(raw: Optional[str]) -> tuple[Path, ...]:
+    if not raw:
+        return ()
+    roots: list[Path] = []
+    for part in raw.split(","):
+        candidate = part.strip()
+        if not candidate:
+            continue
+        roots.append(Path(candidate).expanduser().resolve())
+    return tuple(roots)
 
 
 def parse_dangerous_bypass_level(raw: Optional[str]) -> int:
@@ -168,18 +181,20 @@ def load_config() -> AppConfig:
     token = env("TELEGRAM_BOT_TOKEN")
     if not token:
         raise RuntimeError("missing TELEGRAM_BOT_TOKEN")
+    runtime_paths = RuntimePaths.for_token(token)
 
     return AppConfig(
         telegram_token=token,
         telegram_proxy=resolve_tg_proxy(),
         allowed_user_ids=parse_allowed_user_ids(env("ALLOWED_TELEGRAM_USER_IDS")),
+        allowed_cwd_roots=parse_allowed_cwd_roots(env("ALLOWED_CWD_ROOTS")),
         default_provider=parse_default_provider(env("DEFAULT_PROVIDER", "codex")),
         stream_enabled=resolve_tg_stream_enabled(),
         stream_edit_interval_ms=parse_non_negative_int(env("TG_STREAM_EDIT_INTERVAL_MS", "700"), 700),
         stream_min_delta_chars=parse_non_negative_int(env("TG_STREAM_MIN_DELTA_CHARS", "8"), 8),
         thinking_status_interval_ms=parse_non_negative_int(env("TG_THINKING_STATUS_INTERVAL_MS", "900"), 900),
         default_cwd=Path(env("DEFAULT_CWD", os.getcwd())).expanduser(),
-        state_path=Path(env("STATE_PATH", "./bot_state.json")),
+        state_path=Path(env("STATE_PATH", str(runtime_paths.state_file))).expanduser(),
         codex_session_root=Path(env("CODEX_SESSION_ROOT", "~/.codex/sessions")).expanduser(),
         claude_session_root=Path(env("CLAUDE_SESSION_ROOT", "~/.claude/projects")).expanduser(),
         codex_bin=resolve_codex_bin(env("CODEX_BIN")),
@@ -192,7 +207,7 @@ def load_config() -> AppConfig:
         tg_http_max_retries=parse_non_negative_int(env("TG_HTTP_MAX_RETRIES", "2"), 2),
         tg_http_retry_base_ms=parse_non_negative_int(env("TG_HTTP_RETRY_BASE_MS", "300"), 300),
         tg_http_retry_max_ms=parse_non_negative_int(env("TG_HTTP_RETRY_MAX_MS", "3000"), 3000),
-        tg_instance_lock_path=Path(env("TG_INSTANCE_LOCK_PATH", "./.runtime/bot.lock")).expanduser(),
+        tg_instance_lock_path=Path(env("TG_INSTANCE_LOCK_PATH", str(runtime_paths.lock_base))).expanduser(),
         tg_stream_retry_cooldown_ms=parse_non_negative_int(
             env("TG_STREAM_RETRY_COOLDOWN_MS", "15000"),
             15000,

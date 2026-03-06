@@ -47,10 +47,22 @@ class StreamSummary:
 
 
 @dataclass(frozen=True)
+class StreamConfig:
+    enabled: bool
+    edit_interval_ms: int
+    min_delta_chars: int
+    thinking_status_interval_ms: int
+    retry_cooldown_ms: int
+    max_consecutive_preview_errors: int
+    preview_failfast: bool
+
+
+@dataclass(frozen=True)
 class AppConfig:
     telegram_token: str
     telegram_proxy: Optional[str]
     allowed_user_ids: Optional[set[int]]
+    allowed_cwd_roots: tuple[Path, ...]
     default_provider: AgentProvider
     stream_enabled: bool
     stream_edit_interval_ms: int

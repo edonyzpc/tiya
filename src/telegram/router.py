@@ -1,19 +1,19 @@
+import os
 import shutil
 from pathlib import Path
 from typing import Optional
-import os
 
 from aiogram import Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from domain.models import AgentProvider
-from logging_utils import log
-from services.runner_protocol import RunnerProtocol
-from services.session_store import CodexSessionStore, SessionStoreProtocol
-from services.state_store import StateStore
-from telegram.client import TelegramClient
-from telegram.rendering import RenderProfile, TelegramMessageRenderer
-from telegram.streaming import StreamOrchestrator, TypingStatus
+from ..domain.models import AgentProvider, StreamConfig
+from ..logging_utils import log
+from ..services.runner_protocol import RunnerProtocol
+from ..services.session_store import AsyncSessionStoreProtocol, CodexSessionStore
+from ..services.state_store import StateStore
+from .client import TelegramClient
+from .rendering import RenderProfile, TelegramMessageRenderer
+from .streaming import StreamOrchestrator, TypingStatus
 
 BOT_COMMANDS: list[dict[str, str]] = [
     {"command": "start", "description": "开始使用"},
@@ -32,19 +32,14 @@ class TgCodexService:
     def __init__(
         self,
         api: TelegramClient,
-        session_stores: dict[AgentProvider, SessionStoreProtocol],
+        session_stores: dict[AgentProvider, AsyncSessionStoreProtocol],
         state: StateStore,
         runners: dict[AgentProvider, RunnerProtocol],
         runner_bins: dict[AgentProvider, str],
         default_cwd: Path,
         allowed_user_ids: Optional[set[int]],
-        stream_enabled: bool,
-        stream_edit_interval_ms: int,
-        stream_min_delta_chars: int,
-        thinking_status_interval_ms: int,
-        stream_retry_cooldown_ms: int,
-        stream_max_consecutive_preview_errors: int,
-        stream_preview_failfast: bool,
+        allowed_cwd_roots: tuple[Path, ...],
+        stream_config: StreamConfig,
         renderer: Optional[TelegramMessageRenderer] = None,
     ):
         self.api = api
@@ -54,14 +49,12 @@ class TgCodexService:
         self.runner_bins = runner_bins
         self.default_cwd = default_cwd
         self.allowed_user_ids = allowed_user_ids
-        self.stream_enabled = stream_enabled
-        self.stream_edit_interval_ms = max(200, stream_edit_interval_ms)
-        self.stream_min_delta_chars = max(1, stream_min_delta_chars)
-        self.thinking_status_interval_ms = max(400, thinking_status_interval_ms)
-        self.stream_retry_cooldown_ms = max(0, stream_retry_cooldown_ms)
-        self.stream_max_consecutive_preview_errors = max(1, stream_max_consecutive_preview_errors)
-        self.stream_preview_failfast = bool(stream_preview_failfast)
+        self.allowed_cwd_roots = tuple(path.expanduser().resolve() for path in allowed_cwd_roots)
+        self.stream_config = stream_config
         self.renderer = renderer
+
+    async def shutdown(self) -> None:
+        await self.state.close()
 
     async def setup_bot_menu(self) -> None:
         # Write command menu for default + common language overrides.
@@ -95,7 +88,7 @@ class TgCodexService:
             return
 
         if data.startswith("use:"):
-            provider, session_id = self._parse_use_callback_data(int(user_id), data)
+            provider, session_id = await self._parse_use_callback_data(int(user_id), data)
             await self.api.answer_callback_query(cq_id, text="正在切换会话...")
             await self._switch_to_session(chat_id, reply_to, int(user_id), provider, session_id)
             return
@@ -123,11 +116,11 @@ class TgCodexService:
             await self.api.send_message(chat_id, "没有权限使用这个 bot。", reply_to=message_id)
             return
 
-        provider = self.state.get_active_provider(int(user_id))
+        provider = await self.state.get_active_provider(int(user_id))
         if not text.startswith("/"):
             if await self._try_handle_quick_session_pick(chat_id, message_id, int(user_id), provider, text):
                 return
-            self.state.set_pending_session_pick(int(user_id), False, provider=provider)
+            await self.state.set_pending_session_pick(int(user_id), False, provider=provider)
             await self._handle_chat_message(chat_id, message_id, int(user_id), provider, text, chat_type)
             return
 
@@ -169,12 +162,12 @@ class TgCodexService:
         arg = parts[1].strip() if len(parts) > 1 else ""
         return cmd, arg
 
-    def _parse_use_callback_data(self, user_id: int, data: str) -> tuple[AgentProvider, str]:
+    async def _parse_use_callback_data(self, user_id: int, data: str) -> tuple[AgentProvider, str]:
         # New format: use:<provider>:<session_id>
         parts = data.split(":", 2)
         if len(parts) == 3 and parts[1] in ("codex", "claude"):
             return parts[1], parts[2]
-        return self.state.get_active_provider(user_id), data[4:]
+        return await self.state.get_active_provider(user_id), data[4:]
 
     async def _send_profiled_message(
         self,
@@ -248,7 +241,7 @@ class TgCodexService:
 
     async def _handle_provider(self, chat_id: int, reply_to: int, user_id: int, arg: str) -> None:
         target = arg.strip().lower()
-        current = self.state.get_active_provider(user_id)
+        current = await self.state.get_active_provider(user_id)
         if not target:
             lines = [
                 f"当前 provider: {current}",
@@ -271,8 +264,8 @@ class TgCodexService:
             await self.api.send_message(chat_id, f"当前已是 {selected_provider}。", reply_to=reply_to)
             return
 
-        self.state.set_active_provider(user_id, selected_provider)
-        self.state.set_pending_session_pick(user_id, False, provider=selected_provider)
+        await self.state.set_active_provider(user_id, selected_provider)
+        await self.state.set_pending_session_pick(user_id, False, provider=selected_provider)
         await self.api.send_message(chat_id, f"已切换 provider: {selected_provider}", reply_to=reply_to)
 
     @staticmethod
@@ -299,7 +292,7 @@ class TgCodexService:
                 return
 
         store = self.session_stores[provider]
-        items = store.list_recent(limit=limit)
+        items = await store.list_recent(limit=limit)
         if not items:
             await self.api.send_message(chat_id, f"未找到 {provider} 本地会话记录。", reply_to=reply_to)
             return
@@ -332,8 +325,8 @@ class TgCodexService:
             profile=RenderProfile.SESSIONS,
         )
 
-        self.state.set_last_session_ids(user_id, session_ids, provider=provider)
-        self.state.set_pending_session_pick(user_id, True, provider=provider)
+        await self.state.set_last_session_ids(user_id, session_ids, provider=provider)
+        await self.state.set_pending_session_pick(user_id, True, provider=provider)
 
     async def _handle_use(
         self,
@@ -348,7 +341,7 @@ class TgCodexService:
             await self.api.send_message(chat_id, "示例: /use 1 或 /use <session_id>", reply_to=reply_to)
             return
 
-        session_id, err = self._resolve_session_selector(user_id, provider, selector)
+        session_id, err = await self._resolve_session_selector(user_id, provider, selector)
         if err:
             await self.api.send_message(chat_id, err, reply_to=reply_to)
             return
@@ -367,14 +360,14 @@ class TgCodexService:
         session_id: str,
     ) -> None:
         store = self.session_stores[provider]
-        meta = store.find_by_id(session_id)
+        meta = await store.find_by_id(session_id)
         if not meta:
             await self.api.send_message(chat_id, f"未找到 {provider} session: {session_id}", reply_to=reply_to)
             return
 
-        self.state.set_active_provider(user_id, provider)
-        self.state.set_active_session(user_id, meta.session_id, meta.cwd, provider=provider)
-        self.state.set_pending_session_pick(user_id, False, provider=provider)
+        await self.state.set_active_provider(user_id, provider)
+        await self.state.set_active_session(user_id, meta.session_id, meta.cwd, provider=provider)
+        await self.state.set_pending_session_pick(user_id, False, provider=provider)
         await self.api.send_message(
             chat_id,
             (
@@ -395,7 +388,7 @@ class TgCodexService:
         provider: AgentProvider,
         text: str,
     ) -> bool:
-        if not self.state.is_pending_session_pick(user_id, provider=provider):
+        if not await self.state.is_pending_session_pick(user_id, provider=provider):
             return False
 
         raw = text.strip()
@@ -403,7 +396,7 @@ class TgCodexService:
             return False
 
         idx = int(raw)
-        recent_ids = self.state.get_last_session_ids(user_id, provider=provider)
+        recent_ids = await self.state.get_last_session_ids(user_id, provider=provider)
         if idx <= 0 or idx > len(recent_ids):
             await self.api.send_message(chat_id, "编号无效。请发送 /sessions 重新查看列表。", reply_to=reply_to)
             return True
@@ -424,7 +417,7 @@ class TgCodexService:
         session_id: Optional[str] = None
 
         if not tokens:
-            session_id, _ = self.state.get_active(user_id, provider=provider)
+            session_id, _ = await self.state.get_active(user_id, provider=provider)
             if not session_id:
                 await self.api.send_message(
                     chat_id,
@@ -433,7 +426,7 @@ class TgCodexService:
                 )
                 return
         else:
-            session_id, err = self._resolve_session_selector(user_id, provider, tokens[0])
+            session_id, err = await self._resolve_session_selector(user_id, provider, tokens[0])
             if err:
                 await self.api.send_message(chat_id, err, reply_to=reply_to)
                 return
@@ -449,7 +442,7 @@ class TgCodexService:
 
         limit = max(1, min(50, limit))
         store = self.session_stores[provider]
-        meta, messages = store.get_history(session_id, limit=limit)
+        meta, messages = await store.get_history(session_id, limit=limit)
         if not meta:
             await self.api.send_message(chat_id, f"未找到 session: {session_id}", reply_to=reply_to)
             return
@@ -476,7 +469,7 @@ class TgCodexService:
             reply_to=reply_to,
         )
 
-    def _resolve_session_selector(
+    async def _resolve_session_selector(
         self,
         user_id: int,
         provider: AgentProvider,
@@ -487,7 +480,7 @@ class TgCodexService:
             return None, "示例: /use 1 或 /use <session_id>"
         if raw.isdigit():
             idx = int(raw)
-            recent_ids = self.state.get_last_session_ids(user_id, provider=provider)
+            recent_ids = await self.state.get_last_session_ids(user_id, provider=provider)
             if idx <= 0 or idx > len(recent_ids):
                 return None, "编号无效。先执行 /sessions，再用编号。"
             return recent_ids[idx - 1], None
@@ -500,7 +493,7 @@ class TgCodexService:
         user_id: int,
         provider: AgentProvider,
     ) -> None:
-        session_id, cwd = self.state.get_active(user_id, provider=provider)
+        session_id, cwd = await self.state.get_active(user_id, provider=provider)
         if not session_id:
             await self._send_profiled_message(
                 chat_id,
@@ -519,7 +512,7 @@ class TgCodexService:
 
         title = f"session {session_id[:8]}"
         store = self.session_stores[provider]
-        meta = store.find_by_id(session_id)
+        meta = await store.find_by_id(session_id)
         if meta:
             title = meta.title
 
@@ -563,17 +556,23 @@ class TgCodexService:
         arg: str,
     ) -> None:
         cwd_raw = arg.strip()
-        _, current_cwd = self.state.get_active(user_id, provider=provider)
+        _, current_cwd = await self.state.get_active(user_id, provider=provider)
         target_cwd = Path(current_cwd).expanduser() if current_cwd else self.default_cwd
         if cwd_raw:
-            candidate = Path(cwd_raw).expanduser()
+            candidate = Path(cwd_raw).expanduser().resolve()
             if not candidate.exists() or not candidate.is_dir():
                 await self.api.send_message(chat_id, f"cwd 不存在或不是目录: {candidate}", reply_to=reply_to)
                 return
+            if not self._is_allowed_cwd(candidate):
+                await self.api.send_message(chat_id, f"cwd 不在允许范围内: {candidate}", reply_to=reply_to)
+                return
             target_cwd = candidate
+        elif not self._is_allowed_cwd(target_cwd):
+            await self.api.send_message(chat_id, f"cwd 不在允许范围内: {target_cwd}", reply_to=reply_to)
+            return
 
-        self.state.clear_active_session(user_id, str(target_cwd), provider=provider)
-        self.state.set_pending_session_pick(user_id, False, provider=provider)
+        await self.state.clear_active_session(user_id, str(target_cwd), provider=provider)
+        await self.state.set_pending_session_pick(user_id, False, provider=provider)
         await self.api.send_message(
             chat_id,
             f"已进入新会话模式 ({provider})，cwd: {target_cwd}\n下一条普通消息会创建一个新 session。",
@@ -600,7 +599,7 @@ class TgCodexService:
         prompt: str,
         chat_type: str,
     ) -> None:
-        active_id, active_cwd = self.state.get_active(user_id, provider=provider)
+        active_id, active_cwd = await self.state.get_active(user_id, provider=provider)
         resolved_cwd = Path(active_cwd).expanduser() if active_cwd else self.default_cwd
         cwd = resolved_cwd
         if not resolved_cwd.exists() or not resolved_cwd.is_dir():
@@ -610,22 +609,21 @@ class TgCodexService:
                 f"(provider={provider}, user_id={user_id}, resolved={resolved_cwd}, fallback={fallback})"
             )
             cwd = fallback
+        cwd = cwd.resolve()
+        if not self._is_allowed_cwd(cwd):
+            await self.api.send_message(chat_id, f"cwd 不在允许范围内: {cwd}", reply_to=reply_to)
+            return
 
         mode = "继续当前会话" if active_id else "新建会话"
         log(f"run prompt: user_id={user_id} provider={provider} mode={mode} cwd={cwd} session={active_id}")
 
-        use_stream = self.stream_enabled and chat_type == "private"
+        use_stream = self.stream_config.enabled and chat_type == "private"
         orchestrator = StreamOrchestrator(
             api=self.api,
             chat_id=chat_id,
             reply_to=reply_to,
             stream_enabled=use_stream,
-            stream_edit_interval_ms=self.stream_edit_interval_ms,
-            stream_min_delta_chars=self.stream_min_delta_chars,
-            thinking_status_interval_ms=self.thinking_status_interval_ms,
-            retry_cooldown_ms=self.stream_retry_cooldown_ms,
-            max_consecutive_preview_errors=self.stream_max_consecutive_preview_errors,
-            preview_failfast=self.stream_preview_failfast,
+            stream_config=self.stream_config,
             renderer=self.renderer,
         )
         await orchestrator.start()
@@ -656,7 +654,7 @@ class TgCodexService:
             await orchestrator.stop()
 
         if result.thread_id:
-            self.state.set_active_session(user_id, result.thread_id, str(cwd), provider=provider)
+            await self.state.set_active_session(user_id, result.thread_id, str(cwd), provider=provider)
 
         if result.return_code != 0:
             msg = f"{provider_label} 执行失败 (exit={result.return_code})\n{result.answer}"
@@ -674,6 +672,12 @@ class TgCodexService:
 
         await orchestrator.finalize_success(result.answer, reply_to=reply_to)
         log(orchestrator.summary_line(exit_code=result.return_code))
+
+    def _is_allowed_cwd(self, candidate: Path) -> bool:
+        if not self.allowed_cwd_roots:
+            return True
+        resolved = candidate.expanduser().resolve()
+        return any(resolved.is_relative_to(root) for root in self.allowed_cwd_roots)
 
 
 def build_router(service: TgCodexService) -> Router:
