@@ -12,7 +12,7 @@
 - 两个 provider 都支持会话列表/切换/历史
 - 支持单张图片作为上下文输入：可直接写 caption，或先发图再下一条补文本要求
 - 私聊流式回退链：
-  - `sendMessageDraft`
+  - `sendMessage`
   - `editMessageText`
   - `typing + final sendMessage`
 - 使用 `uv` 管理依赖（`pyproject.toml + uv.lock`）

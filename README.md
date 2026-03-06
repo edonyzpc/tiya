@@ -12,7 +12,7 @@ Language: English | [简体中文](README.zh-CN.md)
 - Session list/switch/history for both providers
 - Single-image context input: send one image with a caption, or send an image and follow with a text instruction
 - Private-chat streaming with fallback chain:
-  - `sendMessageDraft`
+  - `sendMessage`
   - `editMessageText`
   - `typing + final sendMessage`
 - `uv`-managed project (`pyproject.toml + uv.lock`)
