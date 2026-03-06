@@ -4,9 +4,9 @@ import json
 from pathlib import Path
 from typing import Any, Optional, cast
 
-from ..domain.models import AgentProvider, PendingImage
+from ..domain.models import ActiveRunState, AgentProvider, PendingImage, PendingInteraction
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 _PROVIDERS: tuple[AgentProvider, AgentProvider] = ("codex", "claude")
 
 
@@ -36,6 +36,8 @@ class StateStore:
             self.data = self._default_state()
 
         changed = self._normalize_state()
+        if self._clear_transient_state_on_boot():
+            changed = True
         if changed:
             self._atomic_write(self.data)
 
@@ -59,6 +61,30 @@ class StateStore:
                 changed = True
             if self._normalize_user_data(user_data):
                 changed = True
+        return changed
+
+    def _clear_transient_state_on_boot(self) -> bool:
+        users = self.data.get("users")
+        if not isinstance(users, dict):
+            return False
+
+        changed = False
+        for user_data in users.values():
+            if not isinstance(user_data, dict):
+                continue
+            providers = user_data.get("providers")
+            if not isinstance(providers, dict):
+                continue
+            for provider in _PROVIDERS:
+                bucket = providers.get(provider)
+                if not isinstance(bucket, dict):
+                    continue
+                if bucket.get("active_run") is not None:
+                    bucket["active_run"] = None
+                    changed = True
+                if bucket.get("pending_interaction") is not None:
+                    bucket["pending_interaction"] = None
+                    changed = True
         return changed
 
     def _normalize_user_data(self, user_data: dict[str, Any]) -> bool:
@@ -106,6 +132,16 @@ class StateStore:
                 bucket["pending_image"] = normalized_pending_image
                 changed = True
 
+            normalized_active_run = self._normalize_active_run(bucket.get("active_run"))
+            if normalized_active_run != bucket.get("active_run"):
+                bucket["active_run"] = normalized_active_run
+                changed = True
+
+            normalized_pending_interaction = self._normalize_pending_interaction(bucket.get("pending_interaction"))
+            if normalized_pending_interaction != bucket.get("pending_interaction"):
+                bucket["pending_interaction"] = normalized_pending_interaction
+                changed = True
+
         legacy_active_session = user_data.pop("active_session_id", None)
         legacy_active_cwd = user_data.pop("active_cwd", None)
         legacy_last_session_ids = user_data.pop("last_session_ids", None)
@@ -146,6 +182,8 @@ class StateStore:
             "last_session_ids": [],
             "pending_session_pick": False,
             "pending_image": None,
+            "active_run": None,
+            "pending_interaction": None,
         }
 
     @staticmethod
@@ -193,6 +231,32 @@ class StateStore:
             message_id=int(payload["message_id"]),
             created_at=int(payload["created_at"]),
         )
+
+    @staticmethod
+    def _normalize_active_run(value: Any) -> Optional[dict[str, Any]]:
+        if not isinstance(value, dict):
+            return None
+        normalized = ActiveRunState.from_dict(cast(dict[str, object], value))
+        if normalized is None:
+            return None
+        return cast(dict[str, Any], normalized.to_dict())
+
+    @staticmethod
+    def _normalize_pending_interaction(value: Any) -> Optional[dict[str, Any]]:
+        if not isinstance(value, dict):
+            return None
+        normalized = PendingInteraction.from_dict(cast(dict[str, object], value))
+        if normalized is None:
+            return None
+        return cast(dict[str, Any], normalized.to_dict())
+
+    @staticmethod
+    def _active_run_from_dict(payload: dict[str, Any]) -> Optional[ActiveRunState]:
+        return ActiveRunState.from_dict(cast(dict[str, object], payload))
+
+    @staticmethod
+    def _pending_interaction_from_dict(payload: dict[str, Any]) -> Optional[PendingInteraction]:
+        return PendingInteraction.from_dict(cast(dict[str, object], payload))
 
     def _atomic_write(self, payload: dict[str, Any]) -> None:
         tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
@@ -420,3 +484,89 @@ class StateStore:
             if normalized is None:
                 return None
             return self._pending_image_from_dict(normalized)
+
+    async def set_active_run(
+        self,
+        user_id: int,
+        active_run: Optional[ActiveRunState],
+        provider: Optional[AgentProvider] = None,
+    ) -> None:
+        async with self._lock:
+            user_data = self._get_user_unlocked(user_id)
+            resolved_provider = self._resolve_provider_unlocked(user_id, provider)
+            bucket = self._provider_bucket(user_data, resolved_provider)
+            bucket["active_run"] = active_run.to_dict() if active_run is not None else None
+            self._mark_dirty_unlocked()
+
+    async def get_active_run(
+        self,
+        user_id: int,
+        provider: Optional[AgentProvider] = None,
+    ) -> Optional[ActiveRunState]:
+        async with self._lock:
+            user_data = self._get_user_unlocked(user_id)
+            resolved_provider = self._resolve_provider_unlocked(user_id, provider)
+            bucket = self._provider_bucket(user_data, resolved_provider)
+            payload = bucket.get("active_run")
+            if not isinstance(payload, dict):
+                return None
+            return self._active_run_from_dict(payload)
+
+    async def clear_active_run(
+        self,
+        user_id: int,
+        provider: Optional[AgentProvider] = None,
+    ) -> Optional[ActiveRunState]:
+        async with self._lock:
+            user_data = self._get_user_unlocked(user_id)
+            resolved_provider = self._resolve_provider_unlocked(user_id, provider)
+            bucket = self._provider_bucket(user_data, resolved_provider)
+            payload = bucket.get("active_run")
+            bucket["active_run"] = None
+            self._mark_dirty_unlocked()
+            if not isinstance(payload, dict):
+                return None
+            return self._active_run_from_dict(payload)
+
+    async def set_pending_interaction(
+        self,
+        user_id: int,
+        interaction: Optional[PendingInteraction],
+        provider: Optional[AgentProvider] = None,
+    ) -> None:
+        async with self._lock:
+            user_data = self._get_user_unlocked(user_id)
+            resolved_provider = self._resolve_provider_unlocked(user_id, provider)
+            bucket = self._provider_bucket(user_data, resolved_provider)
+            bucket["pending_interaction"] = interaction.to_dict() if interaction is not None else None
+            self._mark_dirty_unlocked()
+
+    async def get_pending_interaction(
+        self,
+        user_id: int,
+        provider: Optional[AgentProvider] = None,
+    ) -> Optional[PendingInteraction]:
+        async with self._lock:
+            user_data = self._get_user_unlocked(user_id)
+            resolved_provider = self._resolve_provider_unlocked(user_id, provider)
+            bucket = self._provider_bucket(user_data, resolved_provider)
+            payload = bucket.get("pending_interaction")
+            if not isinstance(payload, dict):
+                return None
+            return self._pending_interaction_from_dict(payload)
+
+    async def clear_pending_interaction(
+        self,
+        user_id: int,
+        provider: Optional[AgentProvider] = None,
+    ) -> Optional[PendingInteraction]:
+        async with self._lock:
+            user_data = self._get_user_unlocked(user_id)
+            resolved_provider = self._resolve_provider_unlocked(user_id, provider)
+            bucket = self._provider_bucket(user_data, resolved_provider)
+            payload = bucket.get("pending_interaction")
+            bucket["pending_interaction"] = None
+            self._mark_dirty_unlocked()
+            if not isinstance(payload, dict):
+                return None
+            return self._pending_interaction_from_dict(payload)
