@@ -1,6 +1,7 @@
 import asyncio
 import secrets
 import time
+from dataclasses import replace
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -168,6 +169,29 @@ class InteractionCoordinator:
             return await asyncio.wait_for(waiter.future, timeout=max(1, timeout_sec))
         finally:
             await self._clear_interaction(waiter.user_id, waiter.provider, waiter.interaction.interaction_id)
+
+    async def bind_message_id(
+        self,
+        *,
+        user_id: int,
+        provider: AgentProvider,
+        interaction_id: str,
+        message_id: int,
+    ) -> Optional[PendingInteraction]:
+        if message_id <= 0:
+            return None
+        async with self._lock:
+            waiter = self._pending_by_id.get(interaction_id)
+            if waiter is None:
+                return None
+            if waiter.user_id != user_id or waiter.provider != provider:
+                return None
+            if waiter.interaction.message_id == message_id:
+                return waiter.interaction
+            waiter.interaction = replace(waiter.interaction, message_id=message_id)
+            interaction = waiter.interaction
+        await self.state.set_pending_interaction(user_id, interaction, provider=provider)
+        return interaction
 
     async def resolve_option(
         self,

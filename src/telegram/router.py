@@ -14,6 +14,7 @@ from ..domain.models import (
     ApprovalRequest,
     AgentProvider,
     InteractionOption,
+    PendingInteraction,
     PendingImage,
     PromptImage,
     QuestionRequest,
@@ -70,6 +71,8 @@ class RunInteractionBridge:
     user_id: int
     provider: AgentProvider
     chat_type: str
+    orchestrator: Optional[StreamOrchestrator] = None
+    typing: Optional[TypingStatus] = None
 
     async def request_approval(self, request: ApprovalRequest) -> ApprovalDecision:
         return await self.service._request_approval(
@@ -79,6 +82,8 @@ class RunInteractionBridge:
             provider=self.provider,
             chat_type=self.chat_type,
             request=request,
+            orchestrator=self.orchestrator,
+            typing=self.typing,
         )
 
     async def request_question(self, request: QuestionRequest) -> Optional[list[str]]:
@@ -89,6 +94,8 @@ class RunInteractionBridge:
             provider=self.provider,
             chat_type=self.chat_type,
             request=request,
+            orchestrator=self.orchestrator,
+            typing=self.typing,
         )
 
 
@@ -143,7 +150,7 @@ class TgCodexService:
         data = (callback_query.data or "").strip()
         msg = callback_query.message
         chat_id = getattr(getattr(msg, "chat", None), "id", None)
-        reply_to = getattr(msg, "message_id", None)
+        message_id = getattr(msg, "message_id", None)
         user = callback_query.from_user
         user_id = getattr(user, "id", None)
 
@@ -159,7 +166,9 @@ class TgCodexService:
         if data.startswith("use:"):
             provider, session_id = await self._parse_use_callback_data(int(user_id), data)
             await self.api.answer_callback_query(cq_id, text="正在切换会话...")
-            await self._switch_to_session(chat_id, reply_to, int(user_id), provider, session_id)
+            switched = await self._switch_to_session(chat_id, message_id, int(user_id), provider, session_id)
+            if switched and isinstance(message_id, int):
+                await self._clear_message_markup(chat_id, message_id)
             return
 
         if data.startswith("ixa:"):
@@ -177,6 +186,8 @@ class TgCodexService:
                     text="已提交。" if ok else "这个确认已失效。",
                     show_alert=not ok,
                 )
+                if ok and isinstance(message_id, int):
+                    await self._clear_message_markup(chat_id, message_id)
                 return
 
         if data.startswith("ixq:"):
@@ -194,6 +205,8 @@ class TgCodexService:
                     text="已提交。" if ok else "这个问题已失效。",
                     show_alert=not ok,
                 )
+                if ok and isinstance(message_id, int):
+                    await self._clear_message_markup(chat_id, message_id)
                 return
 
         await self.api.answer_callback_query(cq_id, text="不支持的操作。", show_alert=True)
@@ -462,6 +475,50 @@ class TgCodexService:
             lines.extend(["", note.strip()])
         return "\n".join(lines).strip()
 
+    def _compose_closed_interaction_text(
+        self,
+        interaction: PendingInteraction,
+        *,
+        status: str,
+    ) -> str:
+        base = self._compose_interaction_text(
+            interaction.title,
+            interaction.body,
+            options=interaction.options,
+        )
+        return f"{base}\n\n状态: {status.strip()}".strip()
+
+    async def _clear_message_markup(self, chat_id: int, message_id: int) -> None:
+        try:
+            await self.api.edit_message_reply_markup(chat_id=chat_id, message_id=message_id, reply_markup=None)
+        except Exception as exc:
+            log(
+                "[warn] clear inline keyboard failed "
+                f"(chat_id={chat_id}, message_id={message_id}, error={exc!r})"
+            )
+
+    async def _close_interaction_message(
+        self,
+        interaction: PendingInteraction,
+        *,
+        status: str,
+    ) -> None:
+        if interaction.message_id is None:
+            return
+        try:
+            await self.api.edit_message_text(
+                chat_id=interaction.chat_id,
+                message_id=interaction.message_id,
+                text=self._compose_closed_interaction_text(interaction, status=status),
+                reply_markup=None,
+            )
+        except Exception as exc:
+            log(
+                "[warn] close interaction message failed "
+                f"(chat_id={interaction.chat_id}, message_id={interaction.message_id}, error={exc!r})"
+            )
+            await self._clear_message_markup(interaction.chat_id, interaction.message_id)
+
     async def _try_handle_pending_question_reply(
         self,
         chat_id: int,
@@ -534,6 +591,8 @@ class TgCodexService:
         provider: AgentProvider,
         chat_type: str,
         request: ApprovalRequest,
+        orchestrator: Optional[StreamOrchestrator] = None,
+        typing: Optional[TypingStatus] = None,
     ) -> ApprovalDecision:
         if chat_type != "private":
             await self.api.send_message(
@@ -549,57 +608,100 @@ class TgCodexService:
         if request.cwd:
             body_lines.append(f"目录: {request.cwd}")
         options = self._approval_options(request.allow_accept_for_session)
+        status_text = "已结束"
         try:
-            waiter = await self.interactions.open_interaction(
-                user_id=user_id,
-                provider=provider,
-                kind="approval",
-                title=request.title,
-                body="\n".join(body_lines).strip(),
-                options=options,
-                reply_mode="buttons",
-                chat_id=chat_id,
-                message_id=None,
-                timeout_sec=self.interaction_timeout_sec,
-            )
-        except RuntimeError as exc:
-            log(
-                "[warn] approval interaction ignored because active run is missing "
-                f"(provider={provider}, user_id={user_id}, error={exc!r})"
-            )
-            return "cancel"
-
-        try:
-            message = self._compose_interaction_text(
-                request.title,
-                "\n".join(body_lines),
-                note="请在 10 分钟内处理，或发送 /cancel。",
-                options=options,
-            )
-            await self.api.send_message_with_result(
-                chat_id=chat_id,
-                text=message,
-                reply_to=reply_to,
-                reply_markup=self._interaction_markup(
+            if orchestrator is not None:
+                orchestrator.pause_for_interaction()
+            if typing is not None:
+                typing.pause()
+            try:
+                waiter = await self.interactions.open_interaction(
+                    user_id=user_id,
                     provider=provider,
-                    interaction_id=waiter.interaction.interaction_id,
                     kind="approval",
+                    title=request.title,
+                    body="\n".join(body_lines).strip(),
                     options=options,
-                ),
-            )
-        except Exception:
-            await self.interactions.discard_interaction(user_id, provider, waiter.interaction.interaction_id)
-            raise
+                    reply_mode="buttons",
+                    chat_id=chat_id,
+                    message_id=None,
+                    timeout_sec=self.interaction_timeout_sec,
+                )
+            except RuntimeError as exc:
+                log(
+                    "[warn] approval interaction ignored because active run is missing "
+                    f"(provider={provider}, user_id={user_id}, error={exc!r})"
+                )
+                return "cancel"
 
-        try:
-            decision = await self.interactions.wait_for_interaction(waiter, timeout_sec=self.interaction_timeout_sec)
-        except TimeoutError:
-            await self.api.send_message(chat_id, "确认已超时，本轮执行已取消。", reply_to=reply_to)
-            return "cancel"
+            try:
+                message = self._compose_interaction_text(
+                    request.title,
+                    "\n".join(body_lines),
+                    note="请在 10 分钟内处理，或发送 /cancel。",
+                    options=options,
+                )
+                sent = await self.api.send_message_with_result(
+                    chat_id=chat_id,
+                    text=message,
+                    reply_to=reply_to,
+                    reply_markup=self._interaction_markup(
+                        provider=provider,
+                        interaction_id=waiter.interaction.interaction_id,
+                        kind="approval",
+                        options=options,
+                    ),
+                )
+                sent_message_id = getattr(sent, "message_id", None)
+                if isinstance(sent_message_id, int):
+                    await self.interactions.bind_message_id(
+                        user_id=user_id,
+                        provider=provider,
+                        interaction_id=waiter.interaction.interaction_id,
+                        message_id=sent_message_id,
+                    )
+            except Exception:
+                await self.interactions.discard_interaction(user_id, provider, waiter.interaction.interaction_id)
+                raise
 
-        if decision in ("accept", "acceptForSession", "decline", "cancel"):
-            return decision
-        return "decline"
+            decision: str = "decline"
+            cancelled = False
+            try:
+                try:
+                    decision = await self.interactions.wait_for_interaction(waiter, timeout_sec=self.interaction_timeout_sec)
+                except TimeoutError:
+                    status_text = "已超时"
+                    decision = "cancel"
+                    await self.api.send_message(chat_id, "确认已超时，本轮执行已取消。", reply_to=reply_to)
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+            finally:
+                if not cancelled:
+                    if decision == "accept":
+                        status_text = "已批准一次"
+                    elif decision == "acceptForSession":
+                        status_text = "本会话已放行"
+                    elif decision == "decline":
+                        status_text = "已拒绝"
+                    elif decision == "cancel" and status_text != "已超时":
+                        status_text = "已取消"
+                await self._close_interaction_message(waiter.interaction, status=status_text)
+
+            if decision == "accept":
+                return decision
+            if decision == "acceptForSession":
+                return decision
+            if decision == "decline":
+                return decision
+            if decision == "cancel":
+                return decision
+            return "decline"
+        finally:
+            if typing is not None:
+                typing.resume()
+            if orchestrator is not None:
+                orchestrator.resume_after_interaction()
 
     async def _request_question(
         self,
@@ -610,6 +712,8 @@ class TgCodexService:
         provider: AgentProvider,
         chat_type: str,
         request: QuestionRequest,
+        orchestrator: Optional[StreamOrchestrator] = None,
+        typing: Optional[TypingStatus] = None,
     ) -> Optional[list[str]]:
         if chat_type != "private":
             await self.api.send_message(
@@ -623,69 +727,107 @@ class TgCodexService:
         reply_mode = request.reply_mode
         if reply_mode == "buttons" and not options:
             reply_mode = "text"
+        status_text = "已结束"
         try:
-            waiter = await self.interactions.open_interaction(
-                user_id=user_id,
-                provider=provider,
-                kind="question",
-                title=request.title,
-                body=request.body,
-                options=options,
-                reply_mode=reply_mode,
-                chat_id=chat_id,
-                message_id=None,
-                timeout_sec=self.interaction_timeout_sec,
-            )
-        except RuntimeError as exc:
-            log(
-                "[warn] question interaction ignored because active run is missing "
-                f"(provider={provider}, user_id={user_id}, error={exc!r})"
-            )
-            return None
-
-        try:
-            note = "请在 10 分钟内回复，或发送 /cancel。"
-            if reply_mode == "text":
-                note = "请直接发送下一条文字消息作为答案，或发送 /cancel。"
-            await self.api.send_message_with_result(
-                chat_id=chat_id,
-                text=self._compose_interaction_text(
-                    request.title,
-                    request.body,
-                    note=note,
+            if orchestrator is not None:
+                orchestrator.pause_for_interaction()
+            if typing is not None:
+                typing.pause()
+            try:
+                waiter = await self.interactions.open_interaction(
+                    user_id=user_id,
+                    provider=provider,
+                    kind="question",
+                    title=request.title,
+                    body=request.body,
                     options=options,
-                ),
-                reply_to=reply_to,
-                reply_markup=(
-                    self._interaction_markup(
+                    reply_mode=reply_mode,
+                    chat_id=chat_id,
+                    message_id=None,
+                    timeout_sec=self.interaction_timeout_sec,
+                )
+            except RuntimeError as exc:
+                log(
+                    "[warn] question interaction ignored because active run is missing "
+                    f"(provider={provider}, user_id={user_id}, error={exc!r})"
+                )
+                return None
+
+            try:
+                note = "请在 10 分钟内回复，或发送 /cancel。"
+                if reply_mode == "text":
+                    note = "请直接发送下一条文字消息作为答案，或发送 /cancel。"
+                sent = await self.api.send_message_with_result(
+                    chat_id=chat_id,
+                    text=self._compose_interaction_text(
+                        request.title,
+                        request.body,
+                        note=note,
+                        options=options,
+                    ),
+                    reply_to=reply_to,
+                    reply_markup=(
+                        self._interaction_markup(
+                            provider=provider,
+                            interaction_id=waiter.interaction.interaction_id,
+                            kind="question",
+                            options=options,
+                        )
+                        if reply_mode == "buttons"
+                        else None
+                    ),
+                )
+                sent_message_id = getattr(sent, "message_id", None)
+                if isinstance(sent_message_id, int):
+                    await self.interactions.bind_message_id(
+                        user_id=user_id,
                         provider=provider,
                         interaction_id=waiter.interaction.interaction_id,
-                        kind="question",
-                        options=options,
+                        message_id=sent_message_id,
                     )
-                    if reply_mode == "buttons"
-                    else None
-                ),
-            )
-        except Exception:
-            await self.interactions.discard_interaction(user_id, provider, waiter.interaction.interaction_id)
-            raise
+            except Exception:
+                await self.interactions.discard_interaction(user_id, provider, waiter.interaction.interaction_id)
+                raise
 
-        try:
-            answer = await self.interactions.wait_for_interaction(waiter, timeout_sec=self.interaction_timeout_sec)
-        except TimeoutError:
-            await self.api.send_message(chat_id, "问题已超时，本轮执行已取消。", reply_to=reply_to)
-            return None
+            answer: Optional[str] = None
+            cancelled = False
+            try:
+                try:
+                    answer = await self.interactions.wait_for_interaction(waiter, timeout_sec=self.interaction_timeout_sec)
+                except TimeoutError:
+                    status_text = "已超时"
+                    await self.api.send_message(chat_id, "问题已超时，本轮执行已取消。", reply_to=reply_to)
+                    return None
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+            finally:
+                if not cancelled:
+                    if answer == "cancel" and status_text != "已超时":
+                        status_text = "已取消"
+                    elif isinstance(answer, str) and answer.strip():
+                        status_text = f"已回答: {answer.strip()}"
+                        if reply_mode == "buttons":
+                            for option in options:
+                                if option.id == answer:
+                                    status_text = f"已回答: {option.label}"
+                                    break
+                await self._close_interaction_message(waiter.interaction, status=status_text)
 
-        if answer == "cancel":
+            if answer == "cancel":
+                return None
+            if isinstance(answer, str) and answer.strip():
+                if reply_mode == "buttons":
+                    for option in options:
+                        if option.id == answer:
+                            return [option.label]
+                return [answer.strip()]
             return None
-        if isinstance(answer, str) and answer.strip():
-            if reply_mode == "buttons":
-                for option in options:
-                    if option.id == answer:
-                        return [option.label]
-            return [answer.strip()]
-        return None
+        finally:
+            if typing is not None:
+                typing.resume()
+            if orchestrator is not None:
+                orchestrator.resume_after_interaction()
 
     async def _try_handle_pending_image_prompt(
         self,
@@ -975,12 +1117,12 @@ class TgCodexService:
         user_id: int,
         provider: AgentProvider,
         session_id: str,
-    ) -> None:
+    ) -> bool:
         store = self.session_stores[provider]
         meta = await store.find_by_id(session_id)
         if not meta:
             await self.api.send_message(chat_id, f"未找到 {provider} session: {session_id}", reply_to=reply_to)
-            return
+            return False
 
         await self.state.set_active_provider(user_id, provider)
         await self.state.set_active_session(user_id, meta.session_id, meta.cwd, provider=provider)
@@ -996,6 +1138,7 @@ class TgCodexService:
             ),
             reply_to=reply_to,
         )
+        return True
 
     async def _try_handle_quick_session_pick(
         self,
@@ -1270,6 +1413,8 @@ class TgCodexService:
                 user_id=user_id,
                 provider=provider,
                 chat_type=chat_type,
+                orchestrator=orchestrator,
+                typing=typing,
             )
             try:
                 current_task = asyncio.current_task()
