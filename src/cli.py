@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 from typing import Callable, MutableMapping, Optional
 
+from .config import load_config
 from .instance_lock import BotInstanceLock
 from .process_utils import pid_exists, read_process_snapshot
 from .provider_defaults import (
@@ -21,7 +22,7 @@ from .provider_defaults import (
     resolve_codex_bin,
 )
 from .runtime_paths import RuntimePaths, list_runtime_instances, resolve_runtime_home
-from .services.storage import StorageManager
+from .services.storage import StorageConfig, StorageManager
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -518,35 +519,66 @@ def _resolve_storage_db_path() -> Path:
 
 def storage() -> int:
     args = sys.argv[1:]
-    if not args or args[0] not in {"backup", "stats", "vacuum"}:
-        print("[error] 用法: uv run storage <backup DEST|stats|vacuum>")
+    if not args or args[0] not in {"backup", "stats", "vacuum", "rebuild"}:
+        print("[error] 用法: uv run storage <backup DEST|stats|vacuum|rebuild>")
         return 1
 
     command = args[0]
-    db_path = _resolve_storage_db_path()
-    runtime_root = db_path.parent.parent
-    manager = StorageManager(
-        db_path=db_path,
-        instance_id="cli",
-        attachments_root=runtime_root / "instances" / "_storage-cli" / "attachments",
-        maintenance_mode=True,
-    )
 
     async def _run_storage() -> int:
+        if command == "rebuild":
+            for paths in list_runtime_instances(os.environ):
+                running, pid = tg_is_running(paths)
+                if running:
+                    print(f"[error] 检测到 tiya 实例仍在运行: {paths.instance_dir} (pid={pid})")
+                    return 1
+            config = load_config()
+            runtime_paths = RuntimePaths.for_token(config.telegram_token, os.environ)
+            rebuilt_path, backup_path = await StorageManager.rebuild_database(
+                db_path=config.storage_path,
+                instance_id=runtime_paths.instance_name,
+                default_provider=config.default_provider,
+                attachments_root=runtime_paths.attachments_dir,
+                session_roots={
+                    "codex": config.codex_session_root,
+                    "claude": config.claude_session_root,
+                },
+                config_snapshot={
+                    "storage_path": str(config.storage_path),
+                    "default_provider": config.default_provider,
+                    "codex_session_root": str(config.codex_session_root),
+                    "claude_session_root": str(config.claude_session_root),
+                },
+            )
+            print(f"[ok] 已重建 storage 数据库: {rebuilt_path}")
+            if backup_path is not None:
+                print(f"[ok] 已保留旧库备份: {backup_path}")
+            return 0
+
+        db_path = _resolve_storage_db_path()
+        runtime_root = db_path.parent.parent
+        manager = await StorageManager.open(
+            StorageConfig(
+                db_path=db_path,
+                instance_id="cli",
+                attachments_root=runtime_root / "instances" / "_storage-cli" / "attachments",
+                maintenance_mode=True,
+            )
+        )
         try:
             if command == "backup":
                 if len(args) < 2:
                     print("[error] 缺少备份目标路径")
                     return 1
                 destination = Path(args[1]).expanduser()
-                await manager.backup(destination)
+                await manager.maintenance.backup(destination)
                 print(f"[ok] 已备份到: {destination}")
                 return 0
             if command == "stats":
-                stats = await manager.stats()
+                stats = await manager.maintenance.stats()
                 print(json.dumps(stats, ensure_ascii=False, indent=2))
                 return 0
-            await manager.vacuum()
+            await manager.maintenance.vacuum()
             print(f"[ok] 已完成 VACUUM: {db_path}")
             return 0
         finally:

@@ -74,26 +74,26 @@ class _SQLiteSessionStore:
         self.storage = storage
 
     async def refresh_all(self) -> None:
-        await self.storage.refresh_session_root(self.provider, self.root)  # type: ignore[arg-type]
+        await self.storage.sessions.refresh_session_root(self.provider, self.root)  # type: ignore[arg-type]
 
     async def refresh_recent(self) -> None:
         await self.refresh_all()
 
     async def refresh_session(self, session_id: str) -> None:
-        await self.storage.refresh_session(self.provider, self.root, session_id)  # type: ignore[arg-type]
+        await self.storage.sessions.refresh_session(self.provider, self.root, session_id)  # type: ignore[arg-type]
 
     async def list_recent(self, limit: int = 10) -> list[SessionMeta]:
-        return await self.storage.list_recent_sessions(self.provider, self.root, limit)  # type: ignore[arg-type]
+        return await self.storage.sessions.list_recent_sessions(self.provider, self.root, limit)  # type: ignore[arg-type]
 
     async def find_by_id(self, session_id: str) -> Optional[SessionMeta]:
-        return await self.storage.find_session(self.provider, self.root, session_id)  # type: ignore[arg-type]
+        return await self.storage.sessions.find_session(self.provider, self.root, session_id)  # type: ignore[arg-type]
 
     async def get_history(
         self,
         session_id: str,
         limit: int = 10,
     ) -> tuple[Optional[SessionMeta], list[tuple[str, str]]]:
-        return await self.storage.get_session_history(self.provider, self.root, session_id, limit)  # type: ignore[arg-type]
+        return await self.storage.sessions.get_session_history(self.provider, self.root, session_id, limit)  # type: ignore[arg-type]
 
     @staticmethod
     def compact_message(text: str, limit: int = 320) -> str:

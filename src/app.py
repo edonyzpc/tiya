@@ -15,7 +15,7 @@ from .services.codex_runner import CodexRunner
 from .services.runner_protocol import RunnerProtocol
 from .services.session_store import AsyncSessionStore, ClaudeSessionStore, CodexSessionStore
 from .services.state_store import StateStore
-from .services.storage import StorageManager
+from .services.storage import StorageConfig, StorageManager
 from .telegram.client import TelegramClient
 from .telegram.rendering import TelegramMessageRenderer
 from .telegram.router import TgCodexService, build_router
@@ -33,7 +33,6 @@ def _build_config_snapshot(config, paths: RuntimePaths) -> dict[str, object]:
         "app_version": _app_version(),
         "instance_id": paths.instance_name,
         "storage_path": str(config.storage_path),
-        "legacy_state_path": str(config.legacy_state_path),
         "default_provider": config.default_provider,
         "default_cwd": str(config.default_cwd),
         "codex_session_root": str(config.codex_session_root),
@@ -127,17 +126,18 @@ async def run() -> None:
         backend=formatting_backend,
     )
 
-    storage = StorageManager(
-        db_path=config.storage_path,
-        instance_id=runtime_paths.instance_name,
-        default_provider=config.default_provider,
-        attachments_root=runtime_paths.attachments_dir,
-        legacy_state_path=config.legacy_state_path,
-        session_roots={
-            "codex": config.codex_session_root,
-            "claude": config.claude_session_root,
-        },
-        config_snapshot=_build_config_snapshot(config, runtime_paths),
+    storage = await StorageManager.open(
+        StorageConfig(
+            db_path=config.storage_path,
+            instance_id=runtime_paths.instance_name,
+            default_provider=config.default_provider,
+            attachments_root=runtime_paths.attachments_dir,
+            session_roots={
+                "codex": config.codex_session_root,
+                "claude": config.claude_session_root,
+            },
+            config_snapshot=_build_config_snapshot(config, runtime_paths),
+        )
     )
     session_stores = {
         "codex": AsyncSessionStore(CodexSessionStore(config.codex_session_root, storage)),

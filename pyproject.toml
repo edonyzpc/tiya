@@ -3,9 +3,10 @@ name = "tiya"
 version = "0.1.2"
 description = "Run and continue local Codex/Claude sessions from Telegram"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = "==3.12.*"
 license = { text = "Apache-2.0" }
 dependencies = [
+  "aiosqlite>=0.20.0,<0.21.0",
   "aiogram>=3.26.0,<4.0.0",
   "aiohttp-socks>=0.10.1,<0.11.0",
   "claude-agent-sdk>=0.1.47,<0.2.0",

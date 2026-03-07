@@ -422,7 +422,8 @@ class TgCodexService:
     ) -> PendingImage:
         destination = self._attachment_path(chat_id, user_id, message_id, image.file_name)
         await self.api.download_telegram_file(image.file_id, destination)
-        attachment_ref_id = await self.state.storage.store_attachment_file(
+        storage = await self.state.get_storage()
+        attachment_ref_id = await storage.attachments.store_file(
             destination,
             file_name=image.file_name,
             mime_type=image.mime_type,
