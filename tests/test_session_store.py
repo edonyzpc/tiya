@@ -1,3 +1,4 @@
+import base64
 import json
 import sqlite3
 from pathlib import Path
@@ -205,3 +206,105 @@ async def test_refresh_retries_after_import_error(storage: StorageManager, tmp_p
     await store.refresh_recent()
     items = await store.list_recent(limit=5)
     assert [item.session_id for item in items] == ["session-broken"]
+
+
+@pytest.mark.asyncio
+async def test_codex_history_includes_image_markers_and_stores_message_attachments(
+    storage: StorageManager, tmp_path: Path
+):
+    root = tmp_path / "sessions"
+    root.mkdir(parents=True)
+
+    image_bytes = b"\x89PNG\r\n\x1a\ninline-image"
+    image_data_url = "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii")
+    path = root / "image-session.jsonl"
+    lines = [
+        {
+            "type": "session_meta",
+            "payload": {
+                "id": "session-image",
+                "timestamp": "2026-03-05T00:00:00Z",
+                "cwd": "/tmp/project-image",
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "图片中宝可梦叫什么名字"},
+                    {"type": "input_text", "text": "<image name=[Image #1]>"},
+                    {"type": "input_image", "image_url": image_data_url},
+                    {"type": "input_text", "text": "</image>"},
+                ],
+            },
+        },
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "user_message",
+                "message": "图片中宝可梦叫什么名字",
+                "images": [],
+                "local_images": [str(tmp_path / "missing-image.png")],
+                "text_elements": [],
+            },
+        },
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "agent_message",
+                "message": "看起来像是同人 Fakemon。",
+            },
+        },
+    ]
+    with path.open("w", encoding="utf-8") as f:
+        for item in lines:
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+    store = CodexSessionStore(root, storage)
+    await store.refresh_recent()
+    meta, history = await store.get_history("session-image", limit=10)
+
+    assert meta is not None
+    assert history[0][0] == "user"
+    assert history[0][1] == "图片中宝可梦叫什么名字\n[图片: codex-inline-image-1.png]"
+    assert history[1] == ("assistant", "看起来像是同人 Fakemon。")
+
+    with sqlite3.connect(str(storage.db_path)) as conn:
+        row = conn.execute(
+            """
+            SELECT ref.original_file_name
+            FROM session_message_attachments sma
+            JOIN attachment_refs ref ON ref.id=sma.attachment_ref_id
+            """
+        ).fetchone()
+    assert row == ("codex-inline-image-1.png",)
+
+
+@pytest.mark.asyncio
+async def test_storage_migrates_v1_db_to_v2(tmp_path: Path):
+    db_path = tmp_path / "storage" / "tiya.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(str(db_path)) as conn:
+        for statement in StorageManager._schema_v1_sql().split(";\n"):
+            sql = statement.strip()
+            if not sql:
+                continue
+            conn.execute(sql)
+        conn.execute("PRAGMA user_version=1")
+
+    manager = StorageManager(
+        db_path=db_path,
+        instance_id="migrate-test",
+        attachments_root=tmp_path / "attachments",
+    )
+    await manager.close()
+
+    with sqlite3.connect(str(db_path)) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+
+    assert version == 2
+    assert "session_message_attachments" in tables
+    assert "run_attachments" in tables

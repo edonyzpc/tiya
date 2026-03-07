@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
+import mimetypes
 import os
 import queue
 import sqlite3
 import threading
 import time
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Sequence
@@ -15,18 +18,27 @@ from uuid import UUID
 
 from ..domain.models import ActiveRunState, AgentProvider, PendingImage, PendingInteraction, SessionMeta
 
-SCHEMA_VERSION = 1
-PARSER_VERSION = 1
+SCHEMA_VERSION = 2
+PARSER_VERSION = 2
 CONFIG_SNAPSHOT_RETENTION = 32
 _PROVIDERS: tuple[AgentProvider, AgentProvider] = ("codex", "claude")
+_IMAGE_MIME_EXTENSION_OVERRIDES = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/bmp": ".bmp",
+}
 _STATS_COUNT_QUERIES: dict[str, str] = {
     "sessions": "SELECT COUNT(*) FROM sessions",
     "session_raw_lines": "SELECT COUNT(*) FROM session_raw_lines",
     "session_events": "SELECT COUNT(*) FROM session_events",
     "session_messages": "SELECT COUNT(*) FROM session_messages",
+    "session_message_attachments": "SELECT COUNT(*) FROM session_message_attachments",
     "attachment_blobs": "SELECT COUNT(*) FROM attachment_blobs",
     "attachment_refs": "SELECT COUNT(*) FROM attachment_refs",
     "runs": "SELECT COUNT(*) FROM runs",
+    "run_attachments": "SELECT COUNT(*) FROM run_attachments",
     "interactions": "SELECT COUNT(*) FROM interactions",
 }
 
@@ -50,6 +62,25 @@ def _sha256_hex(data: bytes) -> str:
 def _safe_file_name(file_name: Optional[str], fallback: str = "attachment.bin") -> str:
     candidate = Path(file_name or "").name.strip()
     return candidate or fallback
+
+
+def _mime_type_for_name(file_name: Optional[str]) -> Optional[str]:
+    if not file_name:
+        return None
+    guessed, _ = mimetypes.guess_type(file_name)
+    return guessed or None
+
+
+def _extension_for_mime(mime_type: Optional[str], fallback: str = ".bin") -> str:
+    normalized = (mime_type or "").strip().lower()
+    if not normalized:
+        return fallback
+    if normalized in _IMAGE_MIME_EXTENSION_OVERRIDES:
+        return _IMAGE_MIME_EXTENSION_OVERRIDES[normalized]
+    guessed = mimetypes.guess_extension(normalized)
+    if isinstance(guessed, str) and guessed:
+        return guessed
+    return fallback
 
 
 def _compact_title(text: str, limit: int = 46) -> str:
@@ -84,6 +115,29 @@ class _ParsedLine:
     timestamp: Optional[str]
     cwd: Optional[str]
     messages: tuple[tuple[str, str], ...]
+    payload: Optional[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class _AttachmentSeed:
+    file_name: str
+    mime_type: Optional[str]
+    file_size: Optional[int]
+    path: Optional[Path] = None
+    data: Optional[bytes] = None
+
+    def is_materializable(self) -> bool:
+        if self.data is not None:
+            return True
+        if self.path is None:
+            return False
+        return self.path.is_file()
+
+
+@dataclass(frozen=True)
+class _PendingInlineMedia:
+    message_text: str
+    attachments: tuple[_AttachmentSeed, ...]
 
 
 class _SQLiteWorker:
@@ -91,6 +145,10 @@ class _SQLiteWorker:
         self.db_path = db_path
         self._init_callback = init_callback
         self._tasks: queue.Queue[tuple[Callable[..., Any], tuple[Any, ...], dict[str, Any], asyncio.Future[Any], asyncio.AbstractEventLoop] | None] = queue.Queue()
+        self._state_lock = threading.Lock()
+        self._close_waiters: list[tuple[asyncio.Future[None], asyncio.AbstractEventLoop]] = []
+        self._close_requested = False
+        self._closed = False
         self._ready = threading.Event()
         self._thread = threading.Thread(target=self._run, name="tiya-sqlite", daemon=True)
         self._startup_error: Optional[BaseException] = None
@@ -102,20 +160,56 @@ class _SQLiteWorker:
     async def call(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[Any] = loop.create_future()
-        self._tasks.put((func, args, kwargs, future, loop))
-        return await future
+        with self._state_lock:
+            if self._close_requested or self._closed:
+                raise RuntimeError("sqlite worker is closed")
+            self._tasks.put((func, args, kwargs, future, loop))
+        return await self._await_future(future)
 
     async def close(self) -> None:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[None] = loop.create_future()
+        with self._state_lock:
+            if self._closed:
+                future.set_result(None)
+            else:
+                self._close_waiters.append((future, loop))
+                if not self._close_requested:
+                    self._close_requested = True
+                    self._tasks.put(None)
+        await self._await_future(future)
 
-        def _close(conn: sqlite3.Connection) -> None:
-            conn.close()
+    @staticmethod
+    async def _await_future(future: asyncio.Future[Any]) -> Any:
+        try:
+            return await asyncio.wait_for(asyncio.shield(future), timeout=0.01)
+        except asyncio.TimeoutError:
+            # Fall back only when thread-safe wakeups are delayed by the runtime.
+            while not future.done():
+                await asyncio.sleep(0.01)
+            return future.result()
 
-        self._tasks.put((_close, (), {}, future, loop))
-        await future
-        self._tasks.put(None)
-        await asyncio.to_thread(self._thread.join)
+    def _finish_close_waiters(self) -> None:
+        with self._state_lock:
+            if self._closed:
+                return
+            self._closed = True
+            waiters = list(self._close_waiters)
+            self._close_waiters.clear()
+        for future, loop in waiters:
+            if not future.done():
+                loop.call_soon_threadsafe(future.set_result, None)
+
+    def _fail_close_waiters(self, exc: BaseException) -> None:
+        with self._state_lock:
+            if self._closed and not self._close_waiters:
+                return
+            self._closed = True
+            waiters = list(self._close_waiters)
+            self._close_waiters.clear()
+        for future, loop in waiters:
+            if not future.done():
+                loop.call_soon_threadsafe(future.set_exception, exc)
 
     def _run(self) -> None:
         conn: Optional[sqlite3.Connection] = None
@@ -134,6 +228,7 @@ class _SQLiteWorker:
             self._ready.set()
             if conn is not None:
                 conn.close()
+            self._fail_close_waiters(exc)
             return
 
         self._ready.set()
@@ -141,6 +236,10 @@ class _SQLiteWorker:
         while True:
             item = self._tasks.get()
             if item is None:
+                try:
+                    conn.close()
+                finally:
+                    self._finish_close_waiters()
                 return
             func, args, kwargs, future, loop = item
             try:
@@ -188,6 +287,7 @@ class StorageManager:
         self.config_snapshot = dict(config_snapshot or {})
         self.maintenance_mode = maintenance_mode
         self._session_root_ids: dict[AgentProvider, int] = {}
+        self._savepoint_seq = 0
         self._worker = _SQLiteWorker(self.db_path, self._bootstrap_sync)
 
     async def close(self) -> None:
@@ -238,6 +338,7 @@ class StorageManager:
         answer: str,
         stderr_text: str,
         return_code: int,
+        attachment_ref_ids: Sequence[int] = (),
     ) -> None:
         await self._worker.call(
             self._record_run_result_sync,
@@ -252,6 +353,7 @@ class StorageManager:
             answer,
             stderr_text,
             return_code,
+            tuple(int(value) for value in attachment_ref_ids),
         )
 
     async def record_interaction_result(self, interaction_id: str, status: str) -> None:
@@ -364,6 +466,10 @@ class StorageManager:
                 self._migrate_schema_v0_to_v1_sync(conn)
                 version = 1
                 continue
+            if version == 1:
+                self._migrate_schema_v1_to_v2_sync(conn)
+                version = 2
+                continue
             raise RuntimeError(f"missing sqlite migration path from version {version} to {SCHEMA_VERSION}")
 
     def _migrate_schema_v0_to_v1_sync(self, conn: sqlite3.Connection) -> None:
@@ -373,7 +479,37 @@ class StorageManager:
                 if not sql:
                     continue
                 conn.execute(sql)
-            conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+            conn.execute("PRAGMA user_version=1")
+
+        self._write_tx_sync(conn, _op)
+
+    def _migrate_schema_v1_to_v2_sync(self, conn: sqlite3.Connection) -> None:
+        def _op() -> None:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS session_message_attachments (
+                    message_id INTEGER NOT NULL,
+                    attachment_index INTEGER NOT NULL,
+                    attachment_ref_id INTEGER NOT NULL,
+                    PRIMARY KEY (message_id, attachment_index),
+                    FOREIGN KEY (message_id) REFERENCES session_messages(id) ON DELETE CASCADE,
+                    FOREIGN KEY (attachment_ref_id) REFERENCES attachment_refs(id) ON DELETE RESTRICT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS run_attachments (
+                    run_id TEXT NOT NULL,
+                    attachment_index INTEGER NOT NULL,
+                    attachment_ref_id INTEGER NOT NULL,
+                    PRIMARY KEY (run_id, attachment_index),
+                    FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE,
+                    FOREIGN KEY (attachment_ref_id) REFERENCES attachment_refs(id) ON DELETE RESTRICT
+                )
+                """
+            )
+            conn.execute("PRAGMA user_version=2")
 
         self._write_tx_sync(conn, _op)
 
@@ -906,6 +1042,18 @@ class StorageManager:
         )
 
     def _write_tx_sync(self, conn: sqlite3.Connection, op: Callable[[], Any]) -> Any:
+        if conn.in_transaction:
+            savepoint = f"tiya_sp_{self._savepoint_seq}"
+            self._savepoint_seq += 1
+            conn.execute(f"SAVEPOINT {savepoint}")
+            try:
+                result = op()
+            except Exception:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                raise
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            return result
         conn.execute("BEGIN IMMEDIATE")
         try:
             result = op()
@@ -1073,6 +1221,27 @@ class StorageManager:
         source_kind: str,
     ) -> int:
         data = path.read_bytes()
+        return self._write_tx_sync(
+            conn,
+            lambda: self._store_attachment_bytes_nontx_sync(
+                conn,
+                data,
+                file_name,
+                mime_type,
+                file_size,
+                source_kind,
+            ),
+        )
+
+    def _store_attachment_bytes_nontx_sync(
+        self,
+        conn: sqlite3.Connection,
+        data: bytes,
+        file_name: str,
+        mime_type: Optional[str],
+        file_size: Optional[int],
+        source_kind: str,
+    ) -> int:
         sha256 = _sha256_hex(data)
         now = _now_ts()
         conn.execute(
@@ -1091,6 +1260,230 @@ class StorageManager:
             (sha256, now, _safe_file_name(file_name), mime_type, file_size, source_kind),
         )
         return int(cursor.lastrowid)
+
+    def _store_attachment_bytes_sync(
+        self,
+        conn: sqlite3.Connection,
+        data: bytes,
+        file_name: str,
+        mime_type: Optional[str],
+        file_size: Optional[int],
+        source_kind: str,
+    ) -> int:
+        return self._write_tx_sync(
+            conn,
+            lambda: self._store_attachment_bytes_nontx_sync(
+                conn,
+                data,
+                file_name,
+                mime_type,
+                file_size,
+                source_kind,
+            ),
+        )
+
+    def _store_attachment_seed_sync(
+        self,
+        conn: sqlite3.Connection,
+        seed: _AttachmentSeed,
+        source_kind: str,
+    ) -> Optional[int]:
+        if seed.path is not None and seed.path.is_file():
+            return self._store_attachment_file_sync(
+                conn,
+                seed.path,
+                seed.file_name,
+                seed.mime_type,
+                seed.file_size,
+                source_kind,
+            )
+        if seed.data is not None:
+            return self._store_attachment_bytes_sync(
+                conn,
+                seed.data,
+                seed.file_name,
+                seed.mime_type,
+                seed.file_size,
+                source_kind,
+            )
+        return None
+
+    @staticmethod
+    def _attachment_seed_from_local_path(raw_path: str) -> Optional[_AttachmentSeed]:
+        candidate = Path(raw_path.strip()).expanduser()
+        if not raw_path.strip():
+            return None
+        file_name = _safe_file_name(candidate.name, "attachment.bin")
+        mime_type = _mime_type_for_name(file_name)
+        file_size = None
+        if candidate.is_file():
+            try:
+                file_size = int(candidate.stat().st_size)
+            except OSError:
+                file_size = None
+        return _AttachmentSeed(
+            path=candidate,
+            file_name=file_name,
+            mime_type=mime_type,
+            file_size=file_size,
+        )
+
+    @staticmethod
+    def _parse_data_url(data_url: str) -> Optional[tuple[Optional[str], bytes]]:
+        if not isinstance(data_url, str) or not data_url.startswith("data:"):
+            return None
+        header, sep, payload = data_url.partition(",")
+        if not sep:
+            return None
+        meta = header[5:]
+        mime_type: Optional[str] = None
+        is_base64 = False
+        if meta:
+            parts = [part for part in meta.split(";") if part]
+            if parts:
+                if "/" in parts[0]:
+                    mime_type = parts[0].strip().lower() or None
+                    parts = parts[1:]
+                is_base64 = any(part.strip().lower() == "base64" for part in parts)
+        try:
+            if is_base64:
+                data = base64.b64decode(payload.encode("ascii"), validate=True)
+            else:
+                data = urllib.parse.unquote_to_bytes(payload)
+        except Exception:
+            return None
+        return mime_type, data
+
+    @staticmethod
+    def _attachment_seed_from_data_url(data_url: str, *, fallback_name: str) -> Optional[_AttachmentSeed]:
+        parsed = StorageManager._parse_data_url(data_url)
+        if parsed is None:
+            return None
+        mime_type, data = parsed
+        safe_name = _safe_file_name(fallback_name, "attachment.bin")
+        return _AttachmentSeed(
+            data=data,
+            file_name=safe_name,
+            mime_type=mime_type,
+            file_size=len(data),
+        )
+
+    @staticmethod
+    def _is_codex_image_wrapper_text(text: str) -> bool:
+        normalized = text.strip()
+        if not normalized:
+            return True
+        if normalized == "</image>":
+            return True
+        return normalized.startswith("<image ")
+
+    def _extract_codex_response_item_user_media(self, payload: dict[str, Any]) -> Optional[_PendingInlineMedia]:
+        if str(payload.get("type") or "") != "response_item":
+            return None
+        body = payload.get("payload")
+        if not isinstance(body, dict):
+            return None
+        if str(body.get("type") or "") != "message" or str(body.get("role") or "") != "user":
+            return None
+        content = body.get("content")
+        if not isinstance(content, list):
+            return None
+
+        text_parts: list[str] = []
+        attachments: list[_AttachmentSeed] = []
+        image_index = 0
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type") or "")
+            if item_type == "input_text":
+                text = str(item.get("text") or "").strip()
+                if text and not self._is_codex_image_wrapper_text(text):
+                    text_parts.append(text)
+                continue
+            if item_type != "input_image":
+                continue
+            image_url = item.get("image_url")
+            if not isinstance(image_url, str) or not image_url:
+                continue
+            image_index += 1
+            parsed = self._parse_data_url(image_url)
+            if parsed is None:
+                continue
+            mime_type, _ = parsed
+            fallback_name = f"codex-inline-image-{image_index}{_extension_for_mime(mime_type)}"
+            seed = self._attachment_seed_from_data_url(image_url, fallback_name=fallback_name)
+            if seed is not None:
+                attachments.append(seed)
+
+        if not attachments:
+            return None
+        return _PendingInlineMedia(
+            message_text="\n".join(part for part in text_parts if part).strip(),
+            attachments=tuple(attachments),
+        )
+
+    def _extract_codex_event_message_attachments(self, payload: dict[str, Any]) -> tuple[_AttachmentSeed, ...]:
+        if str(payload.get("type") or "") != "event_msg":
+            return ()
+        body = payload.get("payload")
+        if not isinstance(body, dict) or str(body.get("type") or "") != "user_message":
+            return ()
+        raw_local_images = body.get("local_images")
+        if not isinstance(raw_local_images, list):
+            return ()
+        seeds: list[_AttachmentSeed] = []
+        for raw_local_image in raw_local_images:
+            if not isinstance(raw_local_image, str) or not raw_local_image.strip():
+                continue
+            seed = self._attachment_seed_from_local_path(raw_local_image)
+            if seed is not None:
+                seeds.append(seed)
+        return tuple(seeds)
+
+    @staticmethod
+    def _pop_codex_inline_media(
+        pending_inline_media: list[_PendingInlineMedia],
+        message_text: str,
+    ) -> Optional[_PendingInlineMedia]:
+        normalized = (message_text or "").strip()
+        for index, entry in enumerate(pending_inline_media):
+            if entry.message_text == normalized:
+                return pending_inline_media.pop(index)
+        if normalized:
+            return None
+        if pending_inline_media:
+            return pending_inline_media.pop(0)
+        return None
+
+    def _resolve_codex_message_attachment_refs_sync(
+        self,
+        conn: sqlite3.Connection,
+        payload: Optional[dict[str, Any]],
+        *,
+        role: str,
+        message_text: str,
+        pending_inline_media: list[_PendingInlineMedia],
+    ) -> tuple[int, ...]:
+        if role != "user" or not isinstance(payload, dict):
+            return ()
+        inline_media = self._pop_codex_inline_media(pending_inline_media, message_text)
+        event_seeds = self._extract_codex_event_message_attachments(payload)
+        attachment_seeds: tuple[_AttachmentSeed, ...] = ()
+        if any(seed.is_materializable() for seed in event_seeds):
+            attachment_seeds = event_seeds
+        elif inline_media is not None and inline_media.attachments:
+            attachment_seeds = inline_media.attachments
+        elif event_seeds:
+            attachment_seeds = event_seeds
+
+        attachment_ref_ids: list[int] = []
+        for seed in attachment_seeds:
+            attachment_ref_id = self._store_attachment_seed_sync(conn, seed, "codex_session_image")
+            if attachment_ref_id is None or attachment_ref_id in attachment_ref_ids:
+                continue
+            attachment_ref_ids.append(attachment_ref_id)
+        return tuple(attachment_ref_ids)
 
     def _materialize_attachment_ref_sync(
         self,
@@ -1238,14 +1631,13 @@ class StorageManager:
         return self._pending_image_from_snapshot_sync(conn, user_id, provider, snapshot)
 
     def _clear_pending_image_sync(self, conn: sqlite3.Connection, user_id: int, provider: AgentProvider) -> Optional[PendingImage]:
-        snapshot: Optional[dict[str, object]] = None
+        row = self._read_pending_image_row_sync(conn, user_id, provider)
+        snapshot = self._pending_image_snapshot_from_row(row) if row is not None else None
+        if snapshot is None:
+            return None
+        pending = self._pending_image_from_snapshot_sync(conn, user_id, provider, snapshot)
 
         def _op() -> None:
-            nonlocal snapshot
-            self._ensure_provider_state_sync(conn, user_id, provider)
-            row = self._read_pending_image_row_sync(conn, user_id, provider)
-            if row is not None:
-                snapshot = self._pending_image_snapshot_from_row(row)
             conn.execute(
                 """
                 UPDATE provider_state
@@ -1262,9 +1654,7 @@ class StorageManager:
             )
 
         self._write_tx_sync(conn, _op)
-        if snapshot is None:
-            return None
-        return self._pending_image_from_snapshot_sync(conn, user_id, provider, snapshot)
+        return pending
 
     def _set_active_run_sync(self, conn: sqlite3.Connection, user_id: int, provider: AgentProvider, active_run: Optional[ActiveRunState]) -> None:
         def _op() -> None:
@@ -1520,6 +1910,7 @@ class StorageManager:
         answer: str,
         stderr_text: str,
         return_code: int,
+        attachment_ref_ids: tuple[int, ...],
     ) -> None:
         def _op() -> None:
             conn.execute(
@@ -1558,6 +1949,15 @@ class StorageManager:
                     provider,
                 ),
             )
+            conn.execute("DELETE FROM run_attachments WHERE run_id=?", (run_id,))
+            for attachment_index, attachment_ref_id in enumerate(attachment_ref_ids):
+                conn.execute(
+                    """
+                    INSERT INTO run_attachments (run_id, attachment_index, attachment_ref_id)
+                    VALUES (?, ?, ?)
+                    """,
+                    (run_id, attachment_index, attachment_ref_id),
+                )
 
         self._write_tx_sync(conn, _op)
 
@@ -1820,7 +2220,8 @@ class StorageManager:
                 title = str(existing_session_row["title"]) if existing_session_row is not None else None
                 row = conn.execute("SELECT COALESCE(MAX(message_index), -1) AS max_idx FROM session_messages WHERE source_id=?", (source_id,)).fetchone()
                 message_index = int(row["max_idx"]) + 1 if row is not None else 0
-            pending_messages: list[tuple[int, int, str, str, Optional[str]]] = []
+            pending_messages: list[tuple[int, int, str, str, Optional[str], tuple[int, ...]]] = []
+            pending_codex_inline_media: list[_PendingInlineMedia] = []
 
             self._upsert_import_cursor_sync(
                 conn,
@@ -1893,6 +2294,10 @@ class StorageManager:
                                 parsed.payload_json,
                             ),
                         )
+                    if provider == "codex" and isinstance(parsed.payload, dict):
+                        inline_media = self._extract_codex_response_item_user_media(parsed.payload)
+                        if inline_media is not None:
+                            pending_codex_inline_media.append(inline_media)
                     if session_id is None and parsed.provider_session_id:
                         session_id = parsed.provider_session_id
                     if timestamp == "unknown" and parsed.timestamp:
@@ -1902,7 +2307,16 @@ class StorageManager:
                     for role, text in parsed.messages:
                         if title is None and role == "user":
                             title = _compact_title(text)
-                        pending_messages.append((line_no, message_index, role, text, parsed.timestamp))
+                        attachment_ref_ids: tuple[int, ...] = ()
+                        if provider == "codex":
+                            attachment_ref_ids = self._resolve_codex_message_attachment_refs_sync(
+                                conn,
+                                parsed.payload,
+                                role=role,
+                                message_text=text,
+                                pending_inline_media=pending_codex_inline_media,
+                            )
+                        pending_messages.append((line_no, message_index, role, text, parsed.timestamp, attachment_ref_ids))
                         message_index += 1
                     line_no += 1
                     byte_offset = next_offset
@@ -1927,8 +2341,8 @@ class StorageManager:
                 )
                 session_row_id = int(conn.execute("SELECT id FROM sessions WHERE source_id=?", (source_id,)).fetchone()["id"])
             if session_row_id is not None:
-                for line_no_value, message_index_value, role, text, message_timestamp in pending_messages:
-                    conn.execute(
+                for line_no_value, message_index_value, role, text, message_timestamp, attachment_ref_ids in pending_messages:
+                    cursor = conn.execute(
                         """
                         INSERT INTO session_messages (
                             source_id, session_id, line_no, message_index, role, content_text, message_timestamp
@@ -1945,6 +2359,15 @@ class StorageManager:
                             message_timestamp,
                         ),
                     )
+                    message_row_id = int(cursor.lastrowid)
+                    for attachment_index, attachment_ref_id in enumerate(attachment_ref_ids):
+                        conn.execute(
+                            """
+                            INSERT INTO session_message_attachments (message_id, attachment_index, attachment_ref_id)
+                            VALUES (?, ?, ?)
+                            """,
+                            (message_row_id, attachment_index, attachment_ref_id),
+                        )
             conn.execute(
                 """
                 UPDATE session_sources
@@ -1996,13 +2419,13 @@ class StorageManager:
 
     def _parse_session_line(self, provider: AgentProvider, path: Path, raw_text: str) -> _ParsedLine:
         if raw_text == "":
-            return _ParsedLine("empty", None, None, None, None, None, None, ())
+            return _ParsedLine("empty", None, None, None, None, None, None, (), None)
         try:
             payload = json.loads(raw_text)
         except json.JSONDecodeError as exc:
-            return _ParsedLine("invalid_json", str(exc), None, None, None, None, None, ())
+            return _ParsedLine("invalid_json", str(exc), None, None, None, None, None, (), None)
         if not isinstance(payload, dict):
-            return _ParsedLine("parsed", None, _json_dumps(payload), None, None, None, None, ())
+            return _ParsedLine("parsed", None, _json_dumps(payload), None, None, None, None, (), None)
 
         if provider == "codex":
             event_type = payload.get("type") if isinstance(payload.get("type"), str) else None
@@ -2020,7 +2443,7 @@ class StorageManager:
                     messages = (("user", message),)
                 elif msg_type == "agent_message" and message:
                     messages = (("assistant", message),)
-            return _ParsedLine("parsed", None, _json_dumps(payload), event_type, provider_session_id, timestamp, cwd, messages)
+            return _ParsedLine("parsed", None, _json_dumps(payload), event_type, provider_session_id, timestamp, cwd, messages, payload)
 
         event_type = payload.get("type") if isinstance(payload.get("type"), str) else None
         provider_session_id = payload.get("sessionId") if isinstance(payload.get("sessionId"), str) else None
@@ -2037,7 +2460,7 @@ class StorageManager:
             text = self._extract_claude_text(payload.get("message"))
             if text:
                 messages.append(("assistant", text))
-        return _ParsedLine("parsed", None, _json_dumps(payload), event_type, provider_session_id, timestamp, cwd, tuple(messages))
+        return _ParsedLine("parsed", None, _json_dumps(payload), event_type, provider_session_id, timestamp, cwd, tuple(messages), payload)
 
     def _extract_claude_text(self, message: object) -> str:
         if not isinstance(message, dict):
@@ -2057,6 +2480,17 @@ class StorageManager:
             if isinstance(text, str) and text:
                 parts.append(text)
         return "".join(parts).strip()
+
+    @staticmethod
+    def _message_text_with_attachment_names(text: str, attachment_names: Sequence[str]) -> str:
+        if not attachment_names:
+            return text
+        markers = [f"[图片: {name}]" for name in attachment_names if name]
+        if not markers:
+            return text
+        parts = [text] if text else []
+        parts.extend(markers)
+        return "\n".join(parts)
 
     def _session_root_id_for_query(self, conn: sqlite3.Connection, provider: AgentProvider, root: Path) -> Optional[int]:
         row = conn.execute(
@@ -2135,14 +2569,28 @@ class StorageManager:
             return meta, []
         rows = conn.execute(
             """
-            SELECT role, content_text
+            SELECT id, role, content_text
             FROM session_messages
             WHERE session_id=?
             ORDER BY line_no ASC, message_index ASC
             """,
             (int(session_row["id"]),),
         ).fetchall()
-        messages = [(str(row["role"]), str(row["content_text"])) for row in rows]
+        messages: list[tuple[str, str]] = []
+        for row in rows:
+            attachment_rows = conn.execute(
+                """
+                SELECT ref.original_file_name
+                FROM session_message_attachments sma
+                JOIN attachment_refs ref ON ref.id=sma.attachment_ref_id
+                WHERE sma.message_id=?
+                ORDER BY sma.attachment_index ASC
+                """,
+                (int(row["id"]),),
+            ).fetchall()
+            attachment_names = [str(attachment_row["original_file_name"]) for attachment_row in attachment_rows]
+            text = self._message_text_with_attachment_names(str(row["content_text"]), attachment_names)
+            messages.append((str(row["role"]), text))
         if limit > 0:
             messages = messages[-limit:]
         return meta, messages

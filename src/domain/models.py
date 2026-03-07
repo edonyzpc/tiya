@@ -36,6 +36,7 @@ class PromptImage:
     file_name: str
     mime_type: Optional[str]
     file_size: Optional[int]
+    attachment_ref_id: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,7 @@ class PendingImage:
             file_name=self.file_name,
             mime_type=self.mime_type,
             file_size=self.file_size,
+            attachment_ref_id=self.attachment_ref_id,
         )
 
 

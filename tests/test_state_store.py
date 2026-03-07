@@ -118,6 +118,37 @@ async def test_pending_image_is_provider_scoped_and_clear_returns_previous(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_clear_pending_image_keeps_state_when_materialize_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    path = tmp_path / "state.json"
+    store = StateStore(path, default_provider="codex", flush_delay_sec=0.01)
+    image_path = tmp_path / "pending.png"
+    image_path.write_bytes(b"pending-image-bytes")
+    pending_image = PendingImage(
+        path=image_path,
+        file_name="pending.png",
+        mime_type="image/png",
+        file_size=image_path.stat().st_size,
+        message_id=21,
+        created_at=1700000003,
+    )
+    await store.set_pending_image(1, pending_image, provider="codex")
+
+    def _boom(*args: object, **kwargs: object) -> Path:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store.storage, "_materialize_attachment_ref_sync", _boom)
+    with pytest.raises(OSError, match="disk full"):
+        await store.clear_pending_image(1, provider="codex")
+
+    monkeypatch.undo()
+    recovered = await store.get_pending_image(1, provider="codex")
+    assert recovered is not None
+    assert recovered.file_name == "pending.png"
+    assert recovered.message_id == 21
+    await store.close()
+
+
+@pytest.mark.asyncio
 async def test_state_store_concurrent_writes_do_not_drop_state(tmp_path: Path):
     path = tmp_path / "state.json"
     store = StateStore(path, default_provider="codex", flush_delay_sec=0.01)

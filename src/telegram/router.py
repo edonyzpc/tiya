@@ -1565,6 +1565,11 @@ class TgCodexService:
                 answer=final_answer,
                 stderr_text=final_stderr,
                 return_code=final_return_code,
+                attachment_ref_ids=tuple(
+                    image.attachment_ref_id
+                    for image in images
+                    if isinstance(image.attachment_ref_id, int)
+                ),
             )
             await self.interactions.finish_run(user_id, provider, active_run.run_id)
             for image in images:

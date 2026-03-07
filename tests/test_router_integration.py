@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -619,7 +620,7 @@ async def test_status_and_history_use_rendered_entities(bot: Bot, tmp_path: Path
 async def test_photo_with_caption_runs_runner_with_prompt_image(
     bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]
 ):
-    service, api, _, codex_runner, _ = _build_service(tmp_path, session_roots)
+    service, api, state, codex_runner, _ = _build_service(tmp_path, session_roots)
     dp = Dispatcher()
     dp.include_router(build_router(service))
 
@@ -630,8 +631,23 @@ async def test_photo_with_caption_runs_runner_with_prompt_image(
     assert call["prompt"] == "summarize this screenshot"
     assert len(call["images"]) == 1
     assert call["images"][0].file_name.endswith(".jpg")
+    assert call["images"][0].attachment_ref_id is not None
     assert api.download_telegram_file_calls
     assert not (tmp_path / "attachments" / "user-1" / "chat-101" / "msg-41").exists()
+
+    with sqlite3.connect(str(state.storage.db_path)) as conn:
+        row = conn.execute(
+            """
+            SELECT ra.attachment_index, ref.source_kind, ref.original_file_name
+            FROM run_attachments ra
+            JOIN attachment_refs ref ON ref.id=ra.attachment_ref_id
+            JOIN runs run ON run.run_id=ra.run_id
+            WHERE run.provider='codex'
+            ORDER BY run.started_at DESC, ra.attachment_index ASC
+            LIMIT 1
+            """
+        ).fetchone()
+    assert row == (0, "telegram_image", call["images"][0].file_name)
     await service.shutdown()
 
 

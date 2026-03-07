@@ -6,7 +6,7 @@ from typing import Optional, cast
 from ..domain.models import ActiveRunState, AgentProvider, PendingImage, PendingInteraction
 from .storage import StorageManager
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _PROVIDERS: tuple[AgentProvider, AgentProvider] = ("codex", "claude")
 
 
@@ -183,6 +183,7 @@ class StateStore:
         answer: str,
         stderr_text: str,
         return_code: int,
+        attachment_ref_ids: tuple[int, ...] = (),
     ) -> None:
         await self.storage.record_run_result(
             user_id=user_id,
@@ -196,6 +197,7 @@ class StateStore:
             answer=answer,
             stderr_text=stderr_text,
             return_code=return_code,
+            attachment_ref_ids=attachment_ref_ids,
         )
 
     async def record_interaction_result(self, interaction_id: str, status: str) -> None:
