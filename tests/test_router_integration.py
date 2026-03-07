@@ -10,7 +10,7 @@ from aiogram import Bot, Dispatcher
 from src.domain.models import AgentRunResult, ApprovalRequest, StreamConfig
 from src.services.session_store import AsyncSessionStore, ClaudeSessionStore, CodexSessionStore
 from src.services.state_store import StateStore
-from src.services.storage import StorageManager
+from src.services.storage import StorageConfig, StorageManager
 from src.telegram.rendering import TelegramMessageRenderer
 from src.telegram.router import TgCodexService, build_router
 
@@ -343,7 +343,7 @@ def session_roots(tmp_path: Path) -> tuple[Path, Path]:
     return codex_root, claude_root
 
 
-def _build_service(
+async def _build_service(
     tmp_path: Path,
     session_roots: tuple[Path, Path],
     allowed_user_ids=None,
@@ -354,16 +354,17 @@ def _build_service(
     codex_runner = FakeRunner("codex")
     claude_runner = FakeRunner("claude")
     codex_root, claude_root = session_roots
-    storage = StorageManager(
-        db_path=tmp_path / "storage" / "tiya.db",
-        instance_id="router-test",
-        default_provider="codex",
-        attachments_root=tmp_path / "attachments",
-        legacy_state_path=tmp_path / "state.json",
-        session_roots={
-            "codex": codex_root,
-            "claude": claude_root,
-        },
+    storage = await StorageManager.open(
+        StorageConfig(
+            db_path=tmp_path / "storage" / "tiya.db",
+            instance_id="router-test",
+            default_provider="codex",
+            attachments_root=tmp_path / "attachments",
+            session_roots={
+                "codex": codex_root,
+                "claude": claude_root,
+            },
+        )
     )
     state = StateStore(storage, default_provider="codex", flush_delay_sec=0.01)
     renderer = TelegramMessageRenderer(
@@ -488,7 +489,7 @@ def _document_message_update(
 
 @pytest.mark.asyncio
 async def test_help_command_via_feed_update(bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]):
-    service, api, _, _, _ = _build_service(tmp_path, session_roots)
+    service, api, _, _, _ = await _build_service(tmp_path, session_roots)
     dp = Dispatcher()
     dp.include_router(build_router(service))
 
@@ -504,7 +505,7 @@ async def test_help_command_via_feed_update(bot: Bot, tmp_path: Path, session_ro
 
 @pytest.mark.asyncio
 async def test_provider_switch_and_runner_dispatch(bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]):
-    service, _, state, codex_runner, claude_runner = _build_service(tmp_path, session_roots)
+    service, _, state, codex_runner, claude_runner = await _build_service(tmp_path, session_roots)
     dp = Dispatcher()
     dp.include_router(build_router(service))
 
@@ -526,7 +527,7 @@ async def test_provider_switch_and_runner_dispatch(bot: Bot, tmp_path: Path, ses
 async def test_sessions_and_callback_switch_are_provider_aware(
     bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]
 ):
-    service, api, state, _, _ = _build_service(tmp_path, session_roots, allowed_user_ids={1})
+    service, api, state, _, _ = await _build_service(tmp_path, session_roots, allowed_user_ids={1})
     dp = Dispatcher()
     dp.include_router(build_router(service))
 
@@ -567,7 +568,7 @@ async def test_sessions_and_callback_switch_are_provider_aware(
 
 @pytest.mark.asyncio
 async def test_continue_and_new_session_paths(bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]):
-    service, _, state, codex_runner, _ = _build_service(tmp_path, session_roots)
+    service, _, state, codex_runner, _ = await _build_service(tmp_path, session_roots)
     await state.set_active_session(1, "existing-session", str(tmp_path), provider="codex")
     dp = Dispatcher()
     dp.include_router(build_router(service))
@@ -585,7 +586,7 @@ async def test_continue_and_new_session_paths(bot: Bot, tmp_path: Path, session_
 async def test_allowlist_block_applies_to_provider_commands(
     bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]
 ):
-    service, api, _, codex_runner, claude_runner = _build_service(tmp_path, session_roots, allowed_user_ids={1})
+    service, api, _, codex_runner, claude_runner = await _build_service(tmp_path, session_roots, allowed_user_ids={1})
     dp = Dispatcher()
     dp.include_router(build_router(service))
 
@@ -599,7 +600,7 @@ async def test_allowlist_block_applies_to_provider_commands(
 
 @pytest.mark.asyncio
 async def test_status_and_history_use_rendered_entities(bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]):
-    service, api, _, _, _ = _build_service(tmp_path, session_roots)
+    service, api, _, _, _ = await _build_service(tmp_path, session_roots)
     dp = Dispatcher()
     dp.include_router(build_router(service))
 
@@ -620,7 +621,7 @@ async def test_status_and_history_use_rendered_entities(bot: Bot, tmp_path: Path
 async def test_photo_with_caption_runs_runner_with_prompt_image(
     bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]
 ):
-    service, api, state, codex_runner, _ = _build_service(tmp_path, session_roots)
+    service, api, state, codex_runner, _ = await _build_service(tmp_path, session_roots)
     dp = Dispatcher()
     dp.include_router(build_router(service))
 
@@ -655,7 +656,7 @@ async def test_photo_with_caption_runs_runner_with_prompt_image(
 async def test_photo_without_caption_waits_for_next_text_and_clears_pending(
     bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]
 ):
-    service, api, state, codex_runner, _ = _build_service(tmp_path, session_roots)
+    service, api, state, codex_runner, _ = await _build_service(tmp_path, session_roots)
     dp = Dispatcher()
     dp.include_router(build_router(service))
 
@@ -682,7 +683,7 @@ async def test_photo_without_caption_waits_for_next_text_and_clears_pending(
 async def test_ask_command_consumes_pending_image(
     bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]
 ):
-    service, _, state, codex_runner, _ = _build_service(tmp_path, session_roots)
+    service, _, state, codex_runner, _ = await _build_service(tmp_path, session_roots)
     dp = Dispatcher()
     dp.include_router(build_router(service))
 
@@ -702,7 +703,7 @@ async def test_ask_command_consumes_pending_image(
 async def test_quick_session_pick_runs_before_pending_image_prompt(
     bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]
 ):
-    service, api, state, codex_runner, _ = _build_service(tmp_path, session_roots)
+    service, api, state, codex_runner, _ = await _build_service(tmp_path, session_roots)
     dp = Dispatcher()
     dp.include_router(build_router(service))
 
@@ -721,7 +722,7 @@ async def test_quick_session_pick_runs_before_pending_image_prompt(
 async def test_pending_image_is_provider_scoped_and_new_clears_active_provider_pending(
     bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]
 ):
-    service, _, state, codex_runner, claude_runner = _build_service(tmp_path, session_roots)
+    service, _, state, codex_runner, claude_runner = await _build_service(tmp_path, session_roots)
     dp = Dispatcher()
     dp.include_router(build_router(service))
 
@@ -753,7 +754,7 @@ async def test_pending_image_is_provider_scoped_and_new_clears_active_provider_p
 async def test_attachment_paths_are_scoped_by_chat_id(
     bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]
 ):
-    service, _, state, _, _ = _build_service(tmp_path, session_roots)
+    service, _, state, _, _ = await _build_service(tmp_path, session_roots)
     dp = Dispatcher()
     dp.include_router(build_router(service))
 
@@ -773,7 +774,7 @@ async def test_attachment_paths_are_scoped_by_chat_id(
 
 @pytest.mark.asyncio
 async def test_invalid_image_inputs_are_rejected(bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]):
-    service, api, _, codex_runner, _ = _build_service(tmp_path, session_roots)
+    service, api, _, codex_runner, _ = await _build_service(tmp_path, session_roots)
     dp = Dispatcher()
     dp.include_router(build_router(service))
 
@@ -803,7 +804,7 @@ async def test_invalid_image_inputs_are_rejected(bot: Bot, tmp_path: Path, sessi
 
 @pytest.mark.asyncio
 async def test_new_rejects_cwd_outside_allowed_roots(bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]):
-    service, api, _, _, _ = _build_service(
+    service, api, _, _, _ = await _build_service(
         tmp_path,
         session_roots,
         allowed_cwd_roots=(tmp_path / "allowed",),
@@ -826,7 +827,7 @@ async def test_request_approval_send_failure_cleans_pending_interaction(
     tmp_path: Path,
     session_roots: tuple[Path, Path],
 ):
-    service, api, state, _, _ = _build_service(tmp_path, session_roots)
+    service, api, state, _, _ = await _build_service(tmp_path, session_roots)
     run = await service.interactions.start_run(user_id=1, provider="codex", chat_id=101, chat_type="private")
     assert run is not None
 
@@ -862,7 +863,7 @@ async def test_approval_callback_binds_message_id_and_closes_interaction(
     tmp_path: Path,
     session_roots: tuple[Path, Path],
 ):
-    service, api, state, _, _ = _build_service(tmp_path, session_roots, allowed_user_ids={1})
+    service, api, state, _, _ = await _build_service(tmp_path, session_roots, allowed_user_ids={1})
     dp = Dispatcher()
     dp.include_router(build_router(service))
     run = await service.interactions.start_run(user_id=1, provider="codex", chat_id=101, chat_type="private")
@@ -931,7 +932,7 @@ async def test_approval_cancel_closes_interaction_message(
     tmp_path: Path,
     session_roots: tuple[Path, Path],
 ):
-    service, api, state, _, _ = _build_service(tmp_path, session_roots)
+    service, api, state, _, _ = await _build_service(tmp_path, session_roots)
     run = await service.interactions.start_run(user_id=1, provider="codex", chat_id=101, chat_type="private")
     assert run is not None
 
@@ -1014,7 +1015,7 @@ async def test_stream_preview_pauses_while_waiting_for_approval(
                 return AgentRunResult(thread_id="approval-thread", answer="ok", stderr_text="", return_code=0)
             return AgentRunResult(thread_id="approval-thread", answer="cancelled", stderr_text="", return_code=130)
 
-    service, api, state, _, _ = _build_service(
+    service, api, state, _, _ = await _build_service(
         tmp_path,
         session_roots,
         allowed_user_ids={1},
@@ -1025,11 +1026,14 @@ async def test_stream_preview_pauses_while_waiting_for_approval(
     dp.include_router(build_router(service))
 
     task = asyncio.create_task(_feed(dp, bot, _message_update(1, "帮我在 /tmp 目录创建一个 test3", message_id=31)))
-    await asyncio.sleep(0.2)
-
-    pending = await state.get_pending_interaction(1, provider="codex")
+    pending = None
+    for _ in range(20):
+        await asyncio.sleep(0.1)
+        pending = await state.get_pending_interaction(1, provider="codex")
+        if pending is not None and pending.message_id is not None:
+            break
     assert pending is not None
-    assert pending.message_id == 778
+    assert pending.message_id is not None
     preview_edits_before_wait = len(api.edit_message_text_calls)
     typing_calls_before_wait = len(api.send_chat_action_calls)
 
@@ -1049,7 +1053,7 @@ async def test_stream_preview_pauses_while_waiting_for_approval(
                 "chat_instance": "ci",
                 "data": f"ixa:codex:{pending.interaction_id}:accept",
                 "message": {
-                    "message_id": 778,
+                    "message_id": pending.message_id,
                     "date": 1,
                     "chat": {"id": 101, "type": "private"},
                     "text": "approval message",

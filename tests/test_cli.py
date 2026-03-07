@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 from src import cli
 from src.config import load_config
 from src.instance_lock import BotInstanceLock
 from src.process_utils import ProcessSnapshot
 from src.runtime_paths import RuntimePaths
-from src.services.storage import StorageManager
+from src.services.storage import StorageConfig, StorageManager
 
 
 def test_parse_dotenv_line_handles_export_quote_and_comment():
@@ -248,11 +249,14 @@ def test_storage_cli_stats_does_not_create_cli_instance(monkeypatch, tmp_path: P
     db_path = tmp_path / "storage" / "tiya.db"
 
     async def _seed() -> None:
-        manager = StorageManager(
-            db_path=db_path,
-            instance_id="service-instance",
-            attachments_root=tmp_path / "attachments",
+        manager = await StorageManager.open(
+            StorageConfig(
+                db_path=db_path,
+                instance_id="service-instance",
+                attachments_root=tmp_path / "attachments",
+            )
         )
+        await manager.maintenance.stats()
         await manager.close()
 
     asyncio.run(_seed())
@@ -267,3 +271,38 @@ def test_storage_cli_stats_does_not_create_cli_instance(monkeypatch, tmp_path: P
     with sqlite3.connect(str(db_path)) as conn:
         rows = conn.execute("SELECT instance_id FROM instances ORDER BY instance_id").fetchall()
     assert rows == [("service-instance",)]
+
+
+def test_storage_cli_rebuild_uses_config_and_prints_backup(monkeypatch, tmp_path: Path, capsys):
+    token = "123456:abcdefghijklmnopqrstuvwxyz12345"
+    monkeypatch.setenv("TIYA_HOME", str(tmp_path))
+    runtime_paths = RuntimePaths.for_token(token, {"TIYA_HOME": str(tmp_path)})
+    config = SimpleNamespace(
+        telegram_token=token,
+        storage_path=runtime_paths.db_file,
+        default_provider="codex",
+        codex_session_root=tmp_path / "codex-sessions",
+        claude_session_root=tmp_path / "claude-sessions",
+    )
+    config.codex_session_root.mkdir(parents=True, exist_ok=True)
+    config.claude_session_root.mkdir(parents=True, exist_ok=True)
+
+    called = {}
+
+    async def _fake_rebuild_database(**kwargs):
+        called.update(kwargs)
+        return runtime_paths.db_file, runtime_paths.db_file.with_name("tiya.db.bak-test")
+
+    monkeypatch.setattr(cli, "load_config", lambda: config)
+    monkeypatch.setattr(cli, "list_runtime_instances", lambda environ=None: [])
+    monkeypatch.setattr(cli.StorageManager, "rebuild_database", _fake_rebuild_database)
+    monkeypatch.setattr(cli.sys, "argv", ["storage", "rebuild"])
+
+    assert cli.storage() == 0
+    out = capsys.readouterr().out
+
+    assert str(runtime_paths.db_file) in out
+    assert "旧库备份" in out
+    assert called["db_path"] == runtime_paths.db_file
+    assert called["instance_id"] == runtime_paths.instance_name
+    assert called["attachments_root"] == runtime_paths.attachments_dir
