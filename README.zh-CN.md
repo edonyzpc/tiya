@@ -19,7 +19,7 @@
 
 ## 环境要求
 
-- Python 3.10+
+- Python 3.12+
 - `uv`
 - 本地已安装并登录 `codex` 和/或 `claude` CLI
 - Telegram Bot Token
@@ -171,7 +171,10 @@ uv run restart
 ## 测试
 
 ```bash
-uv run pytest
+.venv/bin/python -m pytest
+
+# 运行单个测试文件
+.venv/bin/pytest tests/test_session_store.py -q
 ```
 
 ## 备注

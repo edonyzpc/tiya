@@ -19,7 +19,7 @@ Language: English | [简体中文](README.zh-CN.md)
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.12+
 - `uv`
 - Local `codex` and/or `claude` CLI installed and logged in
 - Telegram bot token
@@ -171,7 +171,10 @@ uv run restart
 ## Testing
 
 ```bash
-uv run pytest
+.venv/bin/python -m pytest
+
+# targeted run
+.venv/bin/pytest tests/test_session_store.py -q
 ```
 
 ## Notes
