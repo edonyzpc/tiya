@@ -1,5 +1,6 @@
 import os
 import asyncio
+from importlib import metadata
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -14,14 +15,39 @@ from .services.codex_runner import CodexRunner
 from .services.runner_protocol import RunnerProtocol
 from .services.session_store import AsyncSessionStore, ClaudeSessionStore, CodexSessionStore
 from .services.state_store import StateStore
+from .services.storage import StorageManager
 from .telegram.client import TelegramClient
 from .telegram.rendering import TelegramMessageRenderer
 from .telegram.router import TgCodexService, build_router
 
 
+def _app_version() -> str:
+    try:
+        return metadata.version("tiya")
+    except metadata.PackageNotFoundError:
+        return "0.0.0-dev"
+
+
+def _build_config_snapshot(config, paths: RuntimePaths) -> dict[str, object]:
+    return {
+        "app_version": _app_version(),
+        "instance_id": paths.instance_name,
+        "storage_path": str(config.storage_path),
+        "legacy_state_path": str(config.legacy_state_path),
+        "default_provider": config.default_provider,
+        "default_cwd": str(config.default_cwd),
+        "codex_session_root": str(config.codex_session_root),
+        "claude_session_root": str(config.claude_session_root),
+        "codex_enabled": bool(config.codex_bin),
+        "claude_enabled": bool(config.claude_bin),
+        "tg_stream_enabled": config.stream_enabled,
+    }
+
+
 async def run() -> None:
     config = load_config()
-    configure_logging(RuntimePaths.for_token(config.telegram_token).log_file)
+    runtime_paths = RuntimePaths.for_token(config.telegram_token)
+    configure_logging(runtime_paths.log_file)
     instance_lock = BotInstanceLock(config.tg_instance_lock_path, config.telegram_token)
     acquired, lock_owner = instance_lock.acquire()
     if not acquired:
@@ -101,11 +127,23 @@ async def run() -> None:
         backend=formatting_backend,
     )
 
+    storage = StorageManager(
+        db_path=config.storage_path,
+        instance_id=runtime_paths.instance_name,
+        default_provider=config.default_provider,
+        attachments_root=runtime_paths.attachments_dir,
+        legacy_state_path=config.legacy_state_path,
+        session_roots={
+            "codex": config.codex_session_root,
+            "claude": config.claude_session_root,
+        },
+        config_snapshot=_build_config_snapshot(config, runtime_paths),
+    )
     session_stores = {
-        "codex": AsyncSessionStore(CodexSessionStore(config.codex_session_root)),
-        "claude": AsyncSessionStore(ClaudeSessionStore(config.claude_session_root)),
+        "codex": AsyncSessionStore(CodexSessionStore(config.codex_session_root, storage)),
+        "claude": AsyncSessionStore(ClaudeSessionStore(config.claude_session_root, storage)),
     }
-    state = StateStore(config.state_path, default_provider=config.default_provider)
+    state = StateStore(storage, default_provider=config.default_provider)
     codex = CodexRunner(
         codex_bin=config.codex_bin,
         sandbox_mode=config.codex_sandbox_mode,
@@ -149,7 +187,7 @@ async def run() -> None:
         runners=runners,
         runner_bins=runner_bins,
         default_cwd=config.default_cwd,
-        attachments_root=RuntimePaths.for_token(config.telegram_token).attachments_dir,
+        attachments_root=runtime_paths.attachments_dir,
         allowed_user_ids=config.allowed_user_ids,
         allowed_cwd_roots=config.allowed_cwd_roots,
         stream_config=stream_config,
@@ -169,6 +207,7 @@ async def run() -> None:
             log(f"[warn] bot command menu setup failed: {exc}")
 
         log("[info] tiya service ready")
+        service.start_background_refresh()
         await dispatcher.start_polling(bot)
     finally:
         await service.shutdown()

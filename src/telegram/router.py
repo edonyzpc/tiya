@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import os
 import shutil
 import time
@@ -128,9 +129,39 @@ class TgCodexService:
         self.interaction_timeout_sec = max(60, int(interaction_timeout_sec))
         self.renderer = renderer
         self.interactions = InteractionCoordinator(state)
+        self._background_tasks: list[asyncio.Task[None]] = []
 
     async def shutdown(self) -> None:
+        for task in self._background_tasks:
+            if task.done():
+                continue
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         await self.state.close()
+
+    def start_background_refresh(self) -> None:
+        for provider, store in self.session_stores.items():
+            refresh_all = getattr(store, "refresh_all", None)
+            if refresh_all is None:
+                continue
+
+            async def _runner(provider_name: AgentProvider, fn) -> None:
+                try:
+                    await fn()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    log(f"[warn] background session refresh failed (provider={provider_name}, error={exc!r})")
+
+            self._background_tasks.append(asyncio.create_task(_runner(provider, refresh_all)))
+
+    @staticmethod
+    def _text_fingerprint(text: str) -> str:
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+        return f"len={len(text)} sha={digest}"
 
     async def setup_bot_menu(self) -> None:
         # Write command menu for default + common language overrides.
@@ -223,7 +254,7 @@ class TgCodexService:
         if user_id is None:
             return
 
-        log(f"update received: user_id={user_id} chat_id={chat_id} text={text[:80]!r}")
+        log(f"update received: user_id={user_id} chat_id={chat_id} text_{self._text_fingerprint(text)}")
         if self.allowed_user_ids is not None and int(user_id) not in self.allowed_user_ids:
             log(f"blocked by allowlist: user_id={user_id}")
             await self.api.send_message(chat_id, "没有权限使用这个 bot。", reply_to=message_id)
@@ -270,7 +301,7 @@ class TgCodexService:
             return
 
         cmd, arg = self._parse_command(text)
-        log(f"command: /{cmd} arg={arg[:80]!r}")
+        log(f"command: /{cmd} arg_{self._text_fingerprint(arg)}")
 
         if cmd in ("start", "help"):
             await self._send_help(chat_id, message_id)
@@ -388,14 +419,24 @@ class TgCodexService:
         user_id: int,
         message_id: int,
         image: IncomingImage,
-    ) -> PromptImage:
+    ) -> PendingImage:
         destination = self._attachment_path(chat_id, user_id, message_id, image.file_name)
         await self.api.download_telegram_file(image.file_id, destination)
-        return PromptImage(
+        attachment_ref_id = await self.state.storage.store_attachment_file(
+            destination,
+            file_name=image.file_name,
+            mime_type=image.mime_type,
+            file_size=image.file_size,
+            source_kind="telegram_image",
+        )
+        return PendingImage(
             path=destination,
             file_name=image.file_name,
             mime_type=image.mime_type,
             file_size=image.file_size,
+            message_id=message_id,
+            created_at=int(time.time()),
+            attachment_ref_id=attachment_ref_id,
         )
 
     async def _clear_pending_image_and_files(
@@ -662,6 +703,7 @@ class TgCodexService:
                     )
             except Exception:
                 await self.interactions.discard_interaction(user_id, provider, waiter.interaction.interaction_id)
+                await self.state.record_interaction_result(waiter.interaction.interaction_id, "send_failed")
                 raise
 
             decision: str = "decline"
@@ -672,9 +714,11 @@ class TgCodexService:
                 except TimeoutError:
                     status_text = "已超时"
                     decision = "cancel"
+                    await self.state.record_interaction_result(waiter.interaction.interaction_id, "timed_out")
                     await self.api.send_message(chat_id, "确认已超时，本轮执行已取消。", reply_to=reply_to)
             except asyncio.CancelledError:
                 cancelled = True
+                await self.state.record_interaction_result(waiter.interaction.interaction_id, "cancelled")
                 raise
             finally:
                 if not cancelled:
@@ -686,6 +730,13 @@ class TgCodexService:
                         status_text = "已拒绝"
                     elif decision == "cancel" and status_text != "已超时":
                         status_text = "已取消"
+                    interaction_status = {
+                        "accept": "accepted",
+                        "acceptForSession": "accepted_for_session",
+                        "decline": "declined",
+                        "cancel": "cancelled" if status_text != "已超时" else "timed_out",
+                    }.get(decision, "declined")
+                    await self.state.record_interaction_result(waiter.interaction.interaction_id, interaction_status)
                 await self._close_interaction_message(waiter.interaction, status=status_text)
 
             if decision == "accept":
@@ -787,6 +838,7 @@ class TgCodexService:
                     )
             except Exception:
                 await self.interactions.discard_interaction(user_id, provider, waiter.interaction.interaction_id)
+                await self.state.record_interaction_result(waiter.interaction.interaction_id, "send_failed")
                 raise
 
             answer: Optional[str] = None
@@ -796,10 +848,12 @@ class TgCodexService:
                     answer = await self.interactions.wait_for_interaction(waiter, timeout_sec=self.interaction_timeout_sec)
                 except TimeoutError:
                     status_text = "已超时"
+                    await self.state.record_interaction_result(waiter.interaction.interaction_id, "timed_out")
                     await self.api.send_message(chat_id, "问题已超时，本轮执行已取消。", reply_to=reply_to)
                     return None
             except asyncio.CancelledError:
                 cancelled = True
+                await self.state.record_interaction_result(waiter.interaction.interaction_id, "cancelled")
                 raise
             finally:
                 if not cancelled:
@@ -812,6 +866,10 @@ class TgCodexService:
                                 if option.id == answer:
                                     status_text = f"已回答: {option.label}"
                                     break
+                    interaction_status = "answered"
+                    if answer == "cancel":
+                        interaction_status = "cancelled" if status_text != "已超时" else "timed_out"
+                    await self.state.record_interaction_result(waiter.interaction.interaction_id, interaction_status)
                 await self._close_interaction_message(waiter.interaction, status=status_text)
 
             if answer == "cancel":
@@ -891,7 +949,7 @@ class TgCodexService:
             return
 
         try:
-            prompt_image = await self._download_prompt_image(chat_id, user_id, reply_to, image)
+            downloaded_image = await self._download_prompt_image(chat_id, user_id, reply_to, image)
         except Exception as exc:
             log(
                 "[error] telegram image download failed "
@@ -910,7 +968,7 @@ class TgCodexService:
         if raw_caption == "/ask" or raw_caption.startswith("/ask "):
             ask_prompt = raw_caption[4:].strip()
             if not ask_prompt:
-                self._delete_attachment_dir(prompt_image.path.parent)
+                self._delete_attachment_dir(downloaded_image.path.parent)
                 await self.api.send_message(chat_id, "请在 /ask 后补充你的要求。", reply_to=reply_to)
                 return
             prompt = ask_prompt
@@ -923,19 +981,11 @@ class TgCodexService:
                 provider=provider,
                 prompt=prompt,
                 chat_type=chat_type,
-                images=(prompt_image,),
+                images=(downloaded_image.to_prompt_image(),),
             )
             return
 
-        pending = PendingImage(
-            path=prompt_image.path,
-            file_name=prompt_image.file_name,
-            mime_type=prompt_image.mime_type,
-            file_size=prompt_image.file_size,
-            message_id=reply_to,
-            created_at=int(time.time()),
-        )
-        await self.state.set_pending_image(user_id, pending, provider=provider)
+        await self.state.set_pending_image(user_id, downloaded_image, provider=provider)
         await self.api.send_message(
             chat_id,
             "已收到这张图片。请下一条发送文本，说明你希望我基于这张图做什么。",
@@ -1051,6 +1101,7 @@ class TgCodexService:
                 return
 
         store = self.session_stores[provider]
+        await store.refresh_recent()
         items = await store.list_recent(limit=limit)
         if not items:
             await self.api.send_message(chat_id, f"未找到 {provider} 本地会话记录。", reply_to=reply_to)
@@ -1119,6 +1170,7 @@ class TgCodexService:
         session_id: str,
     ) -> bool:
         store = self.session_stores[provider]
+        await store.refresh_session(session_id)
         meta = await store.find_by_id(session_id)
         if not meta:
             await self.api.send_message(chat_id, f"未找到 {provider} session: {session_id}", reply_to=reply_to)
@@ -1202,6 +1254,7 @@ class TgCodexService:
 
         limit = max(1, min(50, limit))
         store = self.session_stores[provider]
+        await store.refresh_session(session_id)
         meta, messages = await store.get_history(session_id, limit=limit)
         if not meta:
             await self.api.send_message(chat_id, f"未找到 session: {session_id}", reply_to=reply_to)
@@ -1272,6 +1325,7 @@ class TgCodexService:
 
         title = f"session {session_id[:8]}"
         store = self.session_stores[provider]
+        await store.refresh_session(session_id)
         meta = await store.find_by_id(session_id)
         if meta:
             title = meta.title
@@ -1368,8 +1422,16 @@ class TgCodexService:
                 self._delete_attachment_dir(image.path.parent)
             return
 
+        active_id: Optional[str] = None
+        cwd = self.default_cwd
+        final_status = "failed"
+        final_answer = ""
+        final_stderr = ""
+        final_return_code = -1
+        final_session_after: Optional[str] = None
         try:
             active_id, active_cwd = await self.state.get_active(user_id, provider=provider)
+            final_session_after = active_id
             resolved_cwd = Path(active_cwd).expanduser() if active_cwd else self.default_cwd
             cwd = resolved_cwd
             if not resolved_cwd.exists() or not resolved_cwd.is_dir():
@@ -1381,6 +1443,9 @@ class TgCodexService:
                 cwd = fallback
             cwd = cwd.resolve()
             if not self._is_allowed_cwd(cwd):
+                final_status = "invalid_cwd"
+                final_answer = f"cwd 不在允许范围内: {cwd}"
+                final_return_code = 126
                 await self.api.send_message(chat_id, f"cwd 不在允许范围内: {cwd}", reply_to=reply_to)
                 return
 
@@ -1432,6 +1497,10 @@ class TgCodexService:
                 )
             except Exception as exc:
                 err_msg = f"调用 {provider_label} 时出现异常: {exc}"
+                final_status = "exception"
+                final_answer = err_msg
+                final_stderr = str(exc)
+                final_return_code = 1
                 log(
                     "[error] provider runner exception "
                     f"(provider={provider}, user_id={user_id}, cwd={cwd}, session={active_id}, error={exc!r})"
@@ -1445,24 +1514,58 @@ class TgCodexService:
 
             if result.thread_id:
                 await self.state.set_active_session(user_id, result.thread_id, str(cwd), provider=provider)
+                final_session_after = result.thread_id
+            else:
+                final_session_after = active_id
+
+            refresh_target = result.thread_id or active_id
+            if refresh_target:
+                try:
+                    await self.session_stores[provider].refresh_session(refresh_target)
+                except Exception as exc:
+                    log(
+                        "[warn] session refresh after run failed "
+                        f"(provider={provider}, session={refresh_target}, error={exc!r})"
+                    )
 
             if result.return_code != 0:
                 msg = f"{provider_label} 执行失败 (exit={result.return_code})\n{result.answer}"
                 if result.stderr_text:
                     msg += f"\n\nstderr:\n{result.stderr_text[-1200:]}"
+                final_status = "cancelled" if result.return_code == 130 else "failed"
+                final_answer = result.answer
+                final_stderr = result.stderr_text
+                final_return_code = result.return_code
                 log(
                     "[error] provider runner non-zero exit "
                     f"(provider={provider}, user_id={user_id}, cwd={cwd}, session={active_id}, "
-                    f"exit={result.return_code}, answer_tail={result.answer[-400:]!r}, "
-                    f"stderr_tail={result.stderr_text[-400:]!r})"
+                    f"exit={result.return_code}, answer_{self._text_fingerprint(result.answer)}, "
+                    f"stderr_{self._text_fingerprint(result.stderr_text)})"
                 )
                 await orchestrator.finalize_error(msg, reply_to=reply_to)
                 log(orchestrator.summary_line(exit_code=result.return_code))
                 return
 
+            final_status = "succeeded"
+            final_answer = result.answer
+            final_stderr = result.stderr_text
+            final_return_code = result.return_code
             await orchestrator.finalize_success(result.answer, reply_to=reply_to)
             log(orchestrator.summary_line(exit_code=result.return_code))
         finally:
+            await self.state.record_run_result(
+                user_id=user_id,
+                provider=provider,
+                run_id=active_run.run_id,
+                status=final_status,
+                cwd=cwd,
+                session_id_before=active_id,
+                session_id_after=final_session_after,
+                prompt=prompt,
+                answer=final_answer,
+                stderr_text=final_stderr,
+                return_code=final_return_code,
+            )
             await self.interactions.finish_run(user_id, provider, active_run.run_id)
             for image in images:
                 self._delete_attachment_dir(image.path.parent)

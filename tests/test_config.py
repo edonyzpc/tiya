@@ -24,6 +24,7 @@ def test_load_config_defaults(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:abcdefghijklmnopqrstuvwxyz12345")
     monkeypatch.setenv("DEFAULT_CWD", str(tmp_path))
     monkeypatch.setenv("STATE_PATH", str(tmp_path / "state.json"))
+    monkeypatch.setenv("STORAGE_PATH", str(tmp_path / "storage" / "tiya.db"))
     monkeypatch.setenv("CODEX_SESSION_ROOT", str(tmp_path / "sessions"))
     for key in ("TG_PROXY_URL", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
         monkeypatch.delenv(key, raising=False)
@@ -39,7 +40,8 @@ def test_load_config_defaults(monkeypatch, tmp_path: Path):
     assert config.stream_min_delta_chars == 8
     assert config.thinking_status_interval_ms == 900
     assert config.default_cwd == tmp_path
-    assert config.state_path == tmp_path / "state.json"
+    assert config.storage_path == tmp_path / "storage" / "tiya.db"
+    assert config.legacy_state_path == tmp_path / "state.json"
     assert config.default_provider == "codex"
     assert config.codex_session_root == tmp_path / "sessions"
     assert config.claude_session_root == Path("~/.claude/projects").expanduser()

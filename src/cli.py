@@ -7,6 +7,8 @@ import signal
 import subprocess
 import sys
 import time
+import asyncio
+import json
 from pathlib import Path
 from typing import Callable, MutableMapping, Optional
 
@@ -18,7 +20,8 @@ from .provider_defaults import (
     resolve_claude_bin,
     resolve_codex_bin,
 )
-from .runtime_paths import RuntimePaths, list_runtime_instances
+from .runtime_paths import RuntimePaths, list_runtime_instances, resolve_runtime_home
+from .services.storage import StorageManager
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -296,6 +299,7 @@ def _build_child_env(paths: RuntimePaths) -> dict[str, str]:
             "CLAUDE_SESSION_ROOT": _env_or_default("CLAUDE_SESSION_ROOT", str(default_claude_session_root())),
             "CLAUDE_MODEL": _env_or_default("CLAUDE_MODEL", ""),
             "CLAUDE_PERMISSION_MODE": _env_or_default("CLAUDE_PERMISSION_MODE", "default"),
+            "STORAGE_PATH": str(paths.db_file),
             "STATE_PATH": str(paths.state_file),
             "TG_STREAM_ENABLED": _resolve_stream_enabled(),
             "TG_STREAM_EDIT_INTERVAL_MS": _env_or_default("TG_STREAM_EDIT_INTERVAL_MS", "700"),
@@ -502,6 +506,55 @@ def restart() -> int:
     return start()
 
 
+def _resolve_storage_db_path() -> Path:
+    token = _env_value(os.environ, "TELEGRAM_BOT_TOKEN")
+    if token:
+        return RuntimePaths.for_token(token, os.environ).db_file
+    instances = list_runtime_instances(os.environ)
+    if instances:
+        return instances[0].db_file
+    return resolve_runtime_home(os.environ) / "storage" / "tiya.db"
+
+
+def storage() -> int:
+    args = sys.argv[1:]
+    if not args or args[0] not in {"backup", "stats", "vacuum"}:
+        print("[error] 用法: uv run storage <backup DEST|stats|vacuum>")
+        return 1
+
+    command = args[0]
+    db_path = _resolve_storage_db_path()
+    runtime_root = db_path.parent.parent
+    manager = StorageManager(
+        db_path=db_path,
+        instance_id="cli",
+        attachments_root=runtime_root / "instances" / "_storage-cli" / "attachments",
+        maintenance_mode=True,
+    )
+
+    async def _run_storage() -> int:
+        try:
+            if command == "backup":
+                if len(args) < 2:
+                    print("[error] 缺少备份目标路径")
+                    return 1
+                destination = Path(args[1]).expanduser()
+                await manager.backup(destination)
+                print(f"[ok] 已备份到: {destination}")
+                return 0
+            if command == "stats":
+                stats = await manager.stats()
+                print(json.dumps(stats, ensure_ascii=False, indent=2))
+                return 0
+            await manager.vacuum()
+            print(f"[ok] 已完成 VACUUM: {db_path}")
+            return 0
+        finally:
+            await manager.close()
+
+    return int(asyncio.run(_run_storage()))
+
+
 def _bootstrap() -> None:
     load_dotenv()
     normalize_proxy_env(os.environ)
@@ -534,3 +587,7 @@ def entry_status() -> int:
 
 def entry_logs() -> int:
     return _run(logs)
+
+
+def entry_storage() -> int:
+    return _run(storage)

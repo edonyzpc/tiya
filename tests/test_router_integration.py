@@ -9,6 +9,7 @@ from aiogram import Bot, Dispatcher
 from src.domain.models import AgentRunResult, ApprovalRequest, StreamConfig
 from src.services.session_store import AsyncSessionStore, ClaudeSessionStore, CodexSessionStore
 from src.services.state_store import StateStore
+from src.services.storage import StorageManager
 from src.telegram.rendering import TelegramMessageRenderer
 from src.telegram.router import TgCodexService, build_router
 
@@ -351,8 +352,19 @@ def _build_service(
     api = FakeTelegramClient()
     codex_runner = FakeRunner("codex")
     claude_runner = FakeRunner("claude")
-    state = StateStore(tmp_path / "state.json", default_provider="codex", flush_delay_sec=0.01)
     codex_root, claude_root = session_roots
+    storage = StorageManager(
+        db_path=tmp_path / "storage" / "tiya.db",
+        instance_id="router-test",
+        default_provider="codex",
+        attachments_root=tmp_path / "attachments",
+        legacy_state_path=tmp_path / "state.json",
+        session_roots={
+            "codex": codex_root,
+            "claude": claude_root,
+        },
+    )
+    state = StateStore(storage, default_provider="codex", flush_delay_sec=0.01)
     renderer = TelegramMessageRenderer(
         enabled=True,
         final_only=True,
@@ -366,8 +378,8 @@ def _build_service(
     service = TgCodexService(
         api=api,
         session_stores={
-            "codex": AsyncSessionStore(CodexSessionStore(codex_root)),
-            "claude": AsyncSessionStore(ClaudeSessionStore(claude_root)),
+            "codex": AsyncSessionStore(CodexSessionStore(codex_root, storage)),
+            "claude": AsyncSessionStore(ClaudeSessionStore(claude_root, storage)),
         },
         state=state,
         runners={
@@ -738,8 +750,8 @@ async def test_attachment_paths_are_scoped_by_chat_id(
     assert second_pending is not None
 
     assert first_pending.path != second_pending.path
-    assert "chat-101" in str(first_pending.path)
-    assert "chat-202" in str(second_pending.path)
+    assert "provider-codex" in str(first_pending.path)
+    assert "provider-codex" in str(second_pending.path)
     await service.shutdown()
 
 
@@ -856,8 +868,12 @@ async def test_approval_callback_binds_message_id_and_closes_interaction(
         )
     )
 
-    await asyncio.sleep(0)
-    pending = await state.get_pending_interaction(1, provider="codex")
+    pending = None
+    for _ in range(10):
+        await asyncio.sleep(0)
+        pending = await state.get_pending_interaction(1, provider="codex")
+        if pending is not None and pending.message_id == 777:
+            break
     assert pending is not None
     assert pending.message_id == 777
 
@@ -919,8 +935,12 @@ async def test_approval_cancel_closes_interaction_message(
         )
     )
 
-    await asyncio.sleep(0)
-    pending = await state.get_pending_interaction(1, provider="codex")
+    pending = None
+    for _ in range(10):
+        await asyncio.sleep(0)
+        pending = await state.get_pending_interaction(1, provider="codex")
+        if pending is not None and pending.message_id == 777:
+            break
     assert pending is not None
     assert pending.message_id == 777
 

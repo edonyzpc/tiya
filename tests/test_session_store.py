@@ -1,7 +1,11 @@
 import json
+import sqlite3
 from pathlib import Path
 
+import pytest
+
 from src.services.session_store import ClaudeSessionStore, CodexSessionStore
+from src.services.storage import StorageManager
 
 
 def _write_codex_session(path: Path, session_id: str, cwd: str, user_text: str, assistant_text: str) -> None:
@@ -29,6 +33,7 @@ def _write_codex_session(path: Path, session_id: str, cwd: str, user_text: str, 
             },
         },
         "not-json-line",
+        "",
     ]
     with path.open("w", encoding="utf-8") as f:
         for item in lines:
@@ -74,30 +79,47 @@ def _write_claude_session(path: Path, cwd: str) -> None:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
 
-def test_codex_list_recent_and_title_extraction(tmp_path: Path):
+@pytest.fixture
+async def storage(tmp_path: Path):
+    manager = StorageManager(
+        db_path=tmp_path / "storage" / "tiya.db",
+        instance_id="test-instance",
+        attachments_root=tmp_path / "attachments",
+    )
+    try:
+        yield manager
+    finally:
+        await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_codex_list_recent_and_title_extraction(storage: StorageManager, tmp_path: Path):
     root = tmp_path / "sessions"
     root.mkdir(parents=True)
 
     s1 = root / "a.jsonl"
     _write_codex_session(s1, "session-a", "/tmp/project-a", "first user question", "first answer")
 
-    store = CodexSessionStore(root)
-    items = store.list_recent(limit=5)
+    store = CodexSessionStore(root, storage)
+    await store.refresh_recent()
+    items = await store.list_recent(limit=5)
 
     assert len(items) == 1
     assert items[0].session_id == "session-a"
     assert "first user question" in items[0].title
 
 
-def test_codex_get_history_with_limit(tmp_path: Path):
+@pytest.mark.asyncio
+async def test_codex_get_history_with_limit_and_raw_lines(storage: StorageManager, tmp_path: Path):
     root = tmp_path / "sessions"
     root.mkdir(parents=True)
 
     s1 = root / "b.jsonl"
     _write_codex_session(s1, "session-b", "/tmp/project-b", "hello", "world")
 
-    store = CodexSessionStore(root)
-    meta, history = store.get_history("session-b", limit=1)
+    store = CodexSessionStore(root, storage)
+    await store.refresh_recent()
+    meta, history = await store.get_history("session-b", limit=1)
 
     assert meta is not None
     assert len(history) == 1
@@ -105,8 +127,12 @@ def test_codex_get_history_with_limit(tmp_path: Path):
     assert role == "assistant"
     assert message == "world"
 
+    stats = await storage.stats()
+    assert stats["table_counts"]["session_raw_lines"] == 5
 
-def test_claude_list_recent_and_title_extraction(tmp_path: Path):
+
+@pytest.mark.asyncio
+async def test_claude_list_recent_and_title_extraction(storage: StorageManager, tmp_path: Path):
     root = tmp_path / "claude"
     project_dir = root / "-mnt-code-tiya"
     project_dir.mkdir(parents=True)
@@ -115,15 +141,17 @@ def test_claude_list_recent_and_title_extraction(tmp_path: Path):
     path = project_dir / f"{session_id}.jsonl"
     _write_claude_session(path, cwd="/mnt/code/tiya")
 
-    store = ClaudeSessionStore(root)
-    items = store.list_recent(limit=5)
+    store = ClaudeSessionStore(root, storage)
+    await store.refresh_recent()
+    items = await store.list_recent(limit=5)
 
     assert len(items) == 1
     assert items[0].session_id == session_id
     assert "how does claude session parsing work?" in items[0].title
 
 
-def test_claude_get_history_ignores_meta_and_thinking(tmp_path: Path):
+@pytest.mark.asyncio
+async def test_claude_get_history_ignores_meta_and_thinking(storage: StorageManager, tmp_path: Path):
     root = tmp_path / "claude"
     project_dir = root / "-mnt-code-tiya"
     project_dir.mkdir(parents=True)
@@ -132,15 +160,48 @@ def test_claude_get_history_ignores_meta_and_thinking(tmp_path: Path):
     path = project_dir / f"{session_id}.jsonl"
     _write_claude_session(path, cwd="/mnt/code/tiya")
 
-    # Should be ignored by list/get_history.
     subagent_dir = project_dir / "subagents"
     subagent_dir.mkdir(parents=True)
     (subagent_dir / "agent-1111111.jsonl").write_text("{}", encoding="utf-8")
 
-    store = ClaudeSessionStore(root)
-    meta, history = store.get_history(session_id, limit=10)
+    store = ClaudeSessionStore(root, storage)
+    await store.refresh_recent()
+    meta, history = await store.get_history(session_id, limit=10)
 
     assert meta is not None
     assert len(history) == 2
     assert history[0] == ("user", "how does claude session parsing work?")
     assert history[1] == ("assistant", "assistant answer")
+
+
+@pytest.mark.asyncio
+async def test_refresh_retries_after_import_error(storage: StorageManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    root = tmp_path / "sessions"
+    root.mkdir(parents=True)
+
+    path = root / "broken.jsonl"
+    _write_codex_session(path, "session-broken", "/tmp/project-broken", "hello", "world")
+
+    real_open = Path.open
+
+    def _broken_open(self: Path, *args, **kwargs):
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if self == path and mode == "rb":
+            raise OSError("boom")
+        return real_open(self, *args, **kwargs)
+
+    store = CodexSessionStore(root, storage)
+    monkeypatch.setattr(Path, "open", _broken_open)
+    with pytest.raises(OSError, match="boom"):
+        await store.refresh_recent()
+
+    with sqlite3.connect(str(storage.db_path)) as conn:
+        row = conn.execute(
+            "SELECT last_status, last_error FROM session_import_cursors"
+        ).fetchone()
+    assert row == ("error", "OSError('boom')")
+
+    monkeypatch.undo()
+    await store.refresh_recent()
+    items = await store.list_recent(limit=5)
+    assert [item.session_id for item in items] == ["session-broken"]

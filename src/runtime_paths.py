@@ -43,6 +43,8 @@ class RuntimePaths:
     root: Path
     instance_name: str
     instance_dir: Path
+    storage_dir: Path
+    db_file: Path
     pid_file: Path
     log_file: Path
     state_file: Path
@@ -60,10 +62,13 @@ class RuntimePaths:
     def for_instance_name(cls, root: Path, instance_name: str) -> "RuntimePaths":
         resolved_root = root.expanduser()
         instance_dir = resolved_root / INSTANCE_DIR_NAME / instance_name
+        storage_dir = resolved_root / "storage"
         return cls(
             root=resolved_root,
             instance_name=instance_name,
             instance_dir=instance_dir,
+            storage_dir=storage_dir,
+            db_file=storage_dir / "tiya.db",
             pid_file=instance_dir / "bot.pid",
             log_file=instance_dir / "bot.log",
             state_file=instance_dir / "bot_state.json",

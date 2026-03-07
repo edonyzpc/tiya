@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import sqlite3
 from pathlib import Path
 
 from src import cli
@@ -7,6 +9,7 @@ from src.config import load_config
 from src.instance_lock import BotInstanceLock
 from src.process_utils import ProcessSnapshot
 from src.runtime_paths import RuntimePaths
+from src.services.storage import StorageManager
 
 
 def test_parse_dotenv_line_handles_export_quote_and_comment():
@@ -239,3 +242,28 @@ def test_probe_instance_lock_rejects_when_held(monkeypatch, tmp_path: Path):
         assert "python -m src" in msg
     finally:
         holder.release()
+
+
+def test_storage_cli_stats_does_not_create_cli_instance(monkeypatch, tmp_path: Path, capsys):
+    db_path = tmp_path / "storage" / "tiya.db"
+
+    async def _seed() -> None:
+        manager = StorageManager(
+            db_path=db_path,
+            instance_id="service-instance",
+            attachments_root=tmp_path / "attachments",
+        )
+        await manager.close()
+
+    asyncio.run(_seed())
+
+    monkeypatch.setattr(cli, "_resolve_storage_db_path", lambda: db_path)
+    monkeypatch.setattr(cli.sys, "argv", ["storage", "stats"])
+
+    assert cli.storage() == 0
+    out = capsys.readouterr().out
+    assert str(db_path) in out
+
+    with sqlite3.connect(str(db_path)) as conn:
+        rows = conn.execute("SELECT instance_id FROM instances ORDER BY instance_id").fetchall()
+    assert rows == [("service-instance",)]

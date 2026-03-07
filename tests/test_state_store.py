@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from src.domain.models import PendingImage
-from src.services.state_store import SCHEMA_VERSION, StateStore
+from src.services.state_store import StateStore
 
 
 @pytest.mark.asyncio
@@ -46,7 +46,7 @@ async def test_state_store_provider_roundtrip(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_legacy_schema_migrates_into_codex_bucket(tmp_path: Path):
+async def test_legacy_schema_migrates_into_sqlite(tmp_path: Path):
     path = tmp_path / "state.json"
     payload = {
         "users": {
@@ -65,7 +65,7 @@ async def test_legacy_schema_migrates_into_codex_bucket(tmp_path: Path):
     assert await store.get_active(1, provider="codex") == ("legacy-session", "/legacy")
     assert await store.get_last_session_ids(1, provider="codex") == ["legacy-session", "legacy-2"]
     assert await store.is_pending_session_pick(1, provider="codex") is True
-    assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == SCHEMA_VERSION
+    assert store.path.exists()
     await store.close()
 
 
@@ -129,7 +129,7 @@ async def test_state_store_concurrent_writes_do_not_drop_state(tmp_path: Path):
     await asyncio.gather(*(_write(idx) for idx in range(1, 11)))
     await store.close()
 
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == SCHEMA_VERSION
-    assert len(payload["users"]) == 10
-    assert payload["users"]["10"]["providers"]["codex"]["active_session_id"] == "sid-10"
+    store2 = StateStore(path, default_provider="codex")
+    assert await store2.get_active(10, provider="codex") == ("sid-10", "/work/10")
+    assert await store2.is_pending_session_pick(10, provider="codex") is True
+    await store2.close()

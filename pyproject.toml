@@ -18,6 +18,7 @@ stop = "src.cli:entry_stop"
 restart = "src.cli:entry_restart"
 status = "src.cli:entry_status"
 logs = "src.cli:entry_logs"
+storage = "src.cli:entry_storage"
 
 [dependency-groups]
 dev = [

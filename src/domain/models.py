@@ -46,6 +46,7 @@ class PendingImage:
     file_size: Optional[int]
     message_id: int
     created_at: int
+    attachment_ref_id: Optional[int] = None
 
     def to_prompt_image(self) -> PromptImage:
         return PromptImage(
@@ -265,7 +266,8 @@ class AppConfig:
     stream_min_delta_chars: int
     thinking_status_interval_ms: int
     default_cwd: Path
-    state_path: Path
+    storage_path: Path
+    legacy_state_path: Path
     codex_session_root: Path
     claude_session_root: Path
     codex_bin: str

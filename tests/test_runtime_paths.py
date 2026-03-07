@@ -23,7 +23,9 @@ def test_resolve_runtime_home_prefers_explicit_tiya_home():
     assert resolved == Path("~/custom-tiya").expanduser()
 
 
-def test_runtime_paths_include_attachments_dir():
+def test_runtime_paths_include_storage_and_attachments_dirs():
     paths = RuntimePaths.for_instance_name(root=Path("/tmp/tiya"), instance_name="abc123")
 
+    assert paths.storage_dir == Path("/tmp/tiya/storage")
+    assert paths.db_file == Path("/tmp/tiya/storage/tiya.db")
     assert paths.attachments_dir == Path("/tmp/tiya/instances/abc123/attachments")
