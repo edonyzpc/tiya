@@ -15,6 +15,37 @@ from src.telegram.rendering import TelegramMessageRenderer
 from src.telegram.router import TgCodexService, build_router
 
 
+def _write_codex_session(path: Path, session_id: str, cwd: Path, title: str, timestamp: str) -> None:
+    with path.open("w", encoding="utf-8") as f:
+        f.write(
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "payload": {
+                        "id": session_id,
+                        "timestamp": timestamp,
+                        "cwd": str(cwd),
+                    },
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+        f.write(
+            json.dumps(
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "user_message",
+                        "message": title,
+                    },
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+
+
 class FakeTelegramClient:
     def __init__(self):
         self.send_message_calls = []
@@ -275,34 +306,7 @@ def session_roots(tmp_path: Path) -> tuple[Path, Path]:
     codex_root = tmp_path / "codex-sessions"
     codex_root.mkdir(parents=True)
     codex_path = codex_root / "s1.jsonl"
-    with codex_path.open("w", encoding="utf-8") as f:
-        f.write(
-            json.dumps(
-                {
-                    "type": "session_meta",
-                    "payload": {
-                        "id": "session-1",
-                        "timestamp": "2026-03-05T00:00:00Z",
-                        "cwd": str(tmp_path),
-                    },
-                },
-                ensure_ascii=False,
-            )
-            + "\n"
-        )
-        f.write(
-            json.dumps(
-                {
-                    "type": "event_msg",
-                    "payload": {
-                        "type": "user_message",
-                        "message": "codex title",
-                    },
-                },
-                ensure_ascii=False,
-            )
-            + "\n"
-        )
+    _write_codex_session(codex_path, "session-1", tmp_path, "codex title", "2026-03-05T00:00:00Z")
 
     claude_root = tmp_path / "claude-projects"
     claude_project = claude_root / "-mnt-code-tiya"
@@ -563,6 +567,63 @@ async def test_sessions_and_callback_switch_are_provider_aware(
     claude_ids = await state.get_last_session_ids(1, provider="claude")
     assert len(claude_ids) == 1
     assert claude_ids[0] == "925ffdad-54ba-41ed-8e3b-a7e72843079c"
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_sessions_keyboard_groups_buttons_in_rows_of_five(
+    bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path]
+):
+    codex_root, _ = session_roots
+    for idx in range(2, 7):
+        _write_codex_session(
+            codex_root / f"s{idx}.jsonl",
+            f"session-{idx}",
+            tmp_path,
+            f"codex title {idx}",
+            f"2026-03-{idx:02d}T00:00:00Z",
+        )
+
+    service, api, _, _, _ = await _build_service(tmp_path, session_roots)
+    dp = Dispatcher()
+    dp.include_router(build_router(service))
+
+    await _feed(dp, bot, _message_update(1, "/sessions 6"))
+
+    markup = api.send_message_calls[-1]["reply_markup"]
+    assert markup is not None
+    assert [len(row) for row in markup.inline_keyboard] == [5, 1]
+    assert sum(len(row) for row in markup.inline_keyboard) == 6
+
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_sessions_returns_cached_items_without_waiting_for_refresh(
+    bot: Bot, tmp_path: Path, session_roots: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+):
+    service, api, _, _, _ = await _build_service(tmp_path, session_roots)
+    await service.session_stores["codex"].refresh_recent()
+
+    refresh_started = asyncio.Event()
+    release_refresh = asyncio.Event()
+
+    async def _slow_refresh() -> None:
+        refresh_started.set()
+        await release_refresh.wait()
+
+    monkeypatch.setattr(service.session_stores["codex"], "refresh_recent", _slow_refresh)
+
+    dp = Dispatcher()
+    dp.include_router(build_router(service))
+
+    await asyncio.wait_for(_feed(dp, bot, _message_update(1, "/sessions 1")), timeout=1)
+    await asyncio.wait_for(refresh_started.wait(), timeout=1)
+
+    assert api.send_message_calls
+    assert "最近会话" in api.send_message_calls[-1]["text"]
+
+    release_refresh.set()
     await service.shutdown()
 
 

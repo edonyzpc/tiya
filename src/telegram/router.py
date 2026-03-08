@@ -53,6 +53,8 @@ _MIME_EXTENSION_OVERRIDES = {
     "image/gif": ".gif",
     "image/bmp": ".bmp",
 }
+_SESSION_PICK_BUTTONS_PER_ROW = 5
+_SESSION_LIST_REFRESH_TTL_SEC = 30.0
 
 
 @dataclass(frozen=True)
@@ -129,10 +131,12 @@ class TgCodexService:
         self.interaction_timeout_sec = max(60, int(interaction_timeout_sec))
         self.renderer = renderer
         self.interactions = InteractionCoordinator(state)
-        self._background_tasks: list[asyncio.Task[None]] = []
+        self._background_tasks: set[asyncio.Task[None]] = set()
+        self._session_refresh_tasks: dict[AgentProvider, asyncio.Task[None]] = {}
+        self._session_refresh_completed_at: dict[AgentProvider, float] = {}
 
     async def shutdown(self) -> None:
-        for task in self._background_tasks:
+        for task in tuple(self._background_tasks):
             if task.done():
                 continue
             task.cancel()
@@ -143,20 +147,48 @@ class TgCodexService:
         await self.state.close()
 
     def start_background_refresh(self) -> None:
-        for provider, store in self.session_stores.items():
-            refresh_all = getattr(store, "refresh_all", None)
-            if refresh_all is None:
-                continue
+        for provider in self.session_stores:
+            self._ensure_session_refresh(provider, force=True)
 
-            async def _runner(provider_name: AgentProvider, fn) -> None:
-                try:
-                    await fn()
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    log(f"[warn] background session refresh failed (provider={provider_name}, error={exc!r})")
+    def _session_refresh_is_fresh(self, provider: AgentProvider) -> bool:
+        last_completed_at = self._session_refresh_completed_at.get(provider)
+        if last_completed_at is None:
+            return False
+        return (time.monotonic() - last_completed_at) < _SESSION_LIST_REFRESH_TTL_SEC
 
-            self._background_tasks.append(asyncio.create_task(_runner(provider, refresh_all)))
+    def _ensure_session_refresh(
+        self,
+        provider: AgentProvider,
+        *,
+        force: bool = False,
+    ) -> Optional[asyncio.Task[None]]:
+        existing_task = self._session_refresh_tasks.get(provider)
+        if existing_task is not None and not existing_task.done():
+            return existing_task
+        if not force and self._session_refresh_is_fresh(provider):
+            return None
+
+        async def _runner() -> None:
+            try:
+                await self.session_stores[provider].refresh_recent()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log(f"[warn] background session refresh failed (provider={provider}, error={exc!r})")
+                return
+            self._session_refresh_completed_at[provider] = time.monotonic()
+
+        task = asyncio.create_task(_runner())
+        self._session_refresh_tasks[provider] = task
+        task.add_done_callback(lambda done, provider_name=provider: self._clear_session_refresh_task(provider_name, done))
+        task.add_done_callback(self._background_tasks.discard)
+        self._background_tasks.add(task)
+        return task
+
+    def _clear_session_refresh_task(self, provider: AgentProvider, task: asyncio.Task[None]) -> None:
+        current = self._session_refresh_tasks.get(provider)
+        if current is task:
+            self._session_refresh_tasks.pop(provider, None)
 
     @staticmethod
     def _text_fingerprint(text: str) -> str:
@@ -1102,8 +1134,14 @@ class TgCodexService:
                 return
 
         store = self.session_stores[provider]
-        await store.refresh_recent()
         items = await store.list_recent(limit=limit)
+        if items:
+            self._ensure_session_refresh(provider)
+        else:
+            refresh_task = self._ensure_session_refresh(provider, force=True)
+            if refresh_task is not None:
+                await refresh_task
+            items = await store.list_recent(limit=limit)
         if not items:
             await self.api.send_message(chat_id, f"未找到 {provider} 本地会话记录。", reply_to=reply_to)
             return
@@ -1115,18 +1153,22 @@ class TgCodexService:
             "",
         ]
         session_ids = [s.session_id for s in items]
-        keyboard_rows: list[list[InlineKeyboardButton]] = []
+        buttons: list[InlineKeyboardButton] = []
         for i, session in enumerate(items, start=1):
             short_id = session.session_id[:8]
             cwd_name = Path(session.cwd).name or session.cwd
             lines.append(f"{i}. **{session.title}**")
             lines.append(f"session: `{short_id}` | cwd: `{cwd_name}`")
-            keyboard_rows.append(
-                [InlineKeyboardButton(text=f"切换 {i}", callback_data=f"use:{provider}:{session.session_id}")]
+            buttons.append(
+                InlineKeyboardButton(text=f"切换 {i}", callback_data=f"use:{provider}:{session.session_id}")
             )
 
         lines.append("")
         lines.append("> 也可直接发送编号切换，例如发送 `1`。")
+        keyboard_rows = [
+            buttons[i : i + _SESSION_PICK_BUTTONS_PER_ROW]
+            for i in range(0, len(buttons), _SESSION_PICK_BUTTONS_PER_ROW)
+        ]
         markup = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
         await self._send_profiled_message(
             chat_id,

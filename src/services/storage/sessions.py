@@ -450,6 +450,16 @@ class SessionStorage:
     async def _import_source(self, provider: AgentProvider, root_id: int, path: Path) -> None:
         stat = path.stat()
         started_at = _now_ts()
+        if await self.runtime.read(
+            lambda db: self._source_import_is_unchanged(
+                db,
+                root_id=root_id,
+                path=path,
+                stat_mtime_ns=int(stat.st_mtime_ns),
+                stat_size=int(stat.st_size),
+            )
+        ):
+            return
         prepared = await self.runtime.write(
             lambda db: self._prepare_source_import(
                 db,
@@ -504,6 +514,34 @@ class SessionStorage:
             )
             raise
 
+    async def _source_import_is_unchanged(
+        self,
+        db: StorageSession,
+        *,
+        root_id: int,
+        path: Path,
+        stat_mtime_ns: int,
+        stat_size: int,
+    ) -> bool:
+        row = await db.fetch_one(
+            """
+            SELECT
+                source.mtime_ns,
+                source.size_bytes,
+                source.source_status,
+                cursor.parser_version,
+                cursor.last_status
+            FROM session_sources source
+            LEFT JOIN session_import_cursors cursor ON cursor.source_id=source.id
+            WHERE source.session_root_id=? AND source.normalized_source_path=?
+            """,
+            (root_id, _normalize_path(path)),
+            op_name="import_source_probe",
+        )
+        if row is None:
+            return False
+        return self._is_source_unchanged(row, stat_mtime_ns=stat_mtime_ns, stat_size=stat_size)
+
     async def _prepare_source_import(
         self,
         db: StorageSession,
@@ -525,9 +563,15 @@ class SessionStorage:
                 source.size_bytes,
                 source.source_status,
                 cursor.parser_version,
-                cursor.last_status
+                cursor.last_status,
+                session.provider_session_id AS existing_provider_session_id,
+                session.timestamp AS existing_timestamp,
+                session.cwd AS existing_cwd,
+                session.title AS existing_title,
+                session.first_seen_at AS existing_first_seen_at
             FROM session_sources source
             LEFT JOIN session_import_cursors cursor ON cursor.source_id=source.id
+            LEFT JOIN sessions session ON session.source_id=source.id
             WHERE source.session_root_id=? AND source.normalized_source_path=?
             """,
             (root_id, normalized_path),
@@ -549,27 +593,25 @@ class SessionStorage:
             return PreparedSourceImport(source_id=source_id, unchanged=False, existing_session=None)
 
         source_id = int(source_row["id"])
-        existing_session_row = await db.fetch_one(
-            "SELECT provider_session_id, timestamp, cwd, title, first_seen_at FROM sessions WHERE source_id=?",
-            (source_id,),
-            op_name="existing_session_row",
-        )
-        if existing_session_row is not None:
+        if source_row["existing_timestamp"] is not None:
             existing_session = ExistingSessionState(
                 provider_session_id=(
-                    str(existing_session_row["provider_session_id"])
-                    if isinstance(existing_session_row["provider_session_id"], str)
+                    str(source_row["existing_provider_session_id"])
+                    if isinstance(source_row["existing_provider_session_id"], str)
                     else None
                 ),
-                timestamp=str(existing_session_row["timestamp"]),
-                cwd=str(existing_session_row["cwd"]),
-                title=str(existing_session_row["title"]) if existing_session_row["title"] is not None else None,
+                timestamp=str(source_row["existing_timestamp"]),
+                cwd=str(source_row["existing_cwd"]),
+                title=str(source_row["existing_title"]) if source_row["existing_title"] is not None else None,
                 first_seen_at=(
-                    int(existing_session_row["first_seen_at"])
-                    if existing_session_row["first_seen_at"] is not None
+                    int(source_row["existing_first_seen_at"])
+                    if source_row["existing_first_seen_at"] is not None
                     else None
                 ),
             )
+        unchanged = self._is_source_unchanged(source_row, stat_mtime_ns=stat_mtime_ns, stat_size=stat_size)
+        if unchanged:
+            return PreparedSourceImport(source_id=source_id, unchanged=True, existing_session=existing_session)
         await db.execute(
             """
             UPDATE session_sources
@@ -579,14 +621,17 @@ class SessionStorage:
             (str(path), stat_mtime_ns, stat_size, now, source_id),
             op_name="touch_session_source",
         )
-        unchanged = (
-            int(source_row["mtime_ns"]) == stat_mtime_ns
-            and int(source_row["size_bytes"]) == stat_size
-            and int(source_row["parser_version"] or 0) == PARSER_VERSION
-            and str(source_row["last_status"] or "") == "ok"
-            and str(source_row["source_status"] or "") == "live"
-        )
         return PreparedSourceImport(source_id=source_id, unchanged=unchanged, existing_session=existing_session)
+
+    @staticmethod
+    def _is_source_unchanged(row: Any, *, stat_mtime_ns: int, stat_size: int) -> bool:
+        return (
+            int(row["mtime_ns"]) == stat_mtime_ns
+            and int(row["size_bytes"]) == stat_size
+            and int(row["parser_version"] or 0) == PARSER_VERSION
+            and str(row["last_status"] or "") == "ok"
+            and str(row["source_status"] or "") == "live"
+        )
 
     async def _build_source_import_snapshot(
         self,
@@ -674,9 +719,8 @@ class SessionStorage:
             error=None,
         )
         await db.execute("DELETE FROM session_raw_lines WHERE source_id=?", (source_id,), op_name="delete_session_raw_lines")
-
-        for raw_line in snapshot.raw_lines:
-            await db.execute(
+        if snapshot.raw_lines:
+            await db.executemany(
                 """
                 INSERT INTO session_raw_lines (
                     source_id, line_no, byte_offset, raw_blob, raw_codec, raw_sha256,
@@ -695,21 +739,24 @@ class SessionStorage:
                     event_timestamp=excluded.event_timestamp,
                     cwd=excluded.cwd
                 """,
-                (
-                    source_id,
-                    raw_line.line_no,
-                    raw_line.byte_offset,
-                    raw_line.raw_blob,
-                    raw_line.raw_codec,
-                    raw_line.raw_sha256,
-                    raw_line.parse_status,
-                    raw_line.parse_error,
-                    raw_line.event_type,
-                    raw_line.provider_session_id,
-                    raw_line.event_timestamp,
-                    raw_line.cwd,
-                ),
-                op_name="insert_session_raw_line",
+                [
+                    (
+                        source_id,
+                        raw_line.line_no,
+                        raw_line.byte_offset,
+                        raw_line.raw_blob,
+                        raw_line.raw_codec,
+                        raw_line.raw_sha256,
+                        raw_line.parse_status,
+                        raw_line.parse_error,
+                        raw_line.event_type,
+                        raw_line.provider_session_id,
+                        raw_line.event_timestamp,
+                        raw_line.cwd,
+                    )
+                    for raw_line in snapshot.raw_lines
+                ],
+                op_name="insert_session_raw_line_batch",
             )
 
         await self._apply_projection_snapshot(

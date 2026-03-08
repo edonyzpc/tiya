@@ -12,6 +12,7 @@ from src.domain.models import ActiveRunState, InteractionOption, PendingInteract
 from src.services.session_store import ClaudeSessionStore, CodexSessionStore
 from src.services.storage import StorageConfig, StorageManager
 from src.services.storage.runtime import StorageRuntime
+from src.services.storage import sessions as sessions_module
 from src.services.storage.sessions import SessionStorage
 
 
@@ -276,6 +277,30 @@ async def test_refresh_session_root_builds_file_snapshot_outside_db_callback(
     store = CodexSessionStore(root, storage)
     items = await store.list_recent(limit=5)
     assert [item.session_id for item in items] == ["session-outside-lock"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_recent_does_not_touch_unchanged_sources(
+    storage: StorageManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    root = tmp_path / "sessions"
+    root.mkdir(parents=True)
+    path = root / "stable.jsonl"
+    _write_codex_session(path, "session-stable", "/tmp/project-stable", "hello", "world")
+
+    store = CodexSessionStore(root, storage)
+    await store.refresh_recent()
+
+    with sqlite3.connect(str(storage.db_path)) as conn:
+        initial_updated_at = conn.execute("SELECT updated_at FROM session_sources").fetchone()[0]
+
+    monkeypatch.setattr(sessions_module, "_now_ts", lambda: int(initial_updated_at) + 100)
+    await store.refresh_recent()
+
+    with sqlite3.connect(str(storage.db_path)) as conn:
+        updated_at = conn.execute("SELECT updated_at FROM session_sources").fetchone()[0]
+
+    assert updated_at == initial_updated_at
 
 
 @pytest.mark.asyncio
