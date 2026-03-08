@@ -190,6 +190,38 @@ def test_start_rejects_when_instance_lock_is_occupied(monkeypatch, tmp_path: Pat
     assert "popen_called" not in called
 
 
+def test_start_rejects_unsupported_storage_schema_before_launch(monkeypatch, tmp_path: Path, capsys):
+    token = "123456:abcdefghijklmnopqrstuvwxyz12345"
+    paths = RuntimePaths.for_token(token, {"TIYA_HOME": str(tmp_path)})
+    paths.storage_dir.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(str(paths.db_file)) as conn:
+        conn.execute("PRAGMA user_version=1")
+
+    monkeypatch.setattr(cli, "validate_tg_config", lambda: None)
+    monkeypatch.setattr(cli, "validate_shared_config", lambda: None)
+    monkeypatch.setattr(cli, "has_tg_config", lambda: True)
+    monkeypatch.setattr(cli, "_require_runtime_paths", lambda: paths)
+    monkeypatch.setattr(cli, "_build_child_env", lambda runtime_paths: {"TELEGRAM_BOT_TOKEN": token})
+    monkeypatch.setattr(cli, "_probe_instance_lock", lambda env, runtime_paths: (True, ""))
+    monkeypatch.setattr(cli, "tg_is_running", lambda runtime_paths: (False, None))
+
+    called = {}
+
+    def _fake_popen(*args, **kwargs):
+        called["popen_called"] = True
+        raise AssertionError("Popen should not be called for unsupported schema")
+
+    monkeypatch.setattr(cli.subprocess, "Popen", _fake_popen)
+
+    rc = cli.start()
+    out = capsys.readouterr().out
+
+    assert rc == 1
+    assert "storage schema 1 is not supported" in out
+    assert "uv run storage rebuild" in out
+    assert "popen_called" not in called
+
+
 def test_is_pid_running_rejects_zombie_snapshot(monkeypatch):
     monkeypatch.setattr(
         "src.cli.read_process_snapshot",

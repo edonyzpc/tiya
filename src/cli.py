@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -23,6 +24,7 @@ from .provider_defaults import (
 )
 from .runtime_paths import RuntimePaths, list_runtime_instances, resolve_runtime_home
 from .services.storage import StorageConfig, StorageManager
+from .services.storage.schema import SCHEMA_VERSION
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -353,6 +355,24 @@ def _tail_last_lines(path: Path, lines: int = 10) -> list[str]:
     return content[-lines:]
 
 
+def _unsupported_storage_schema_message(db_path: Path) -> Optional[str]:
+    if not db_path.is_file():
+        return None
+    try:
+        with sqlite3.connect(str(db_path)) as conn:
+            row = conn.execute("PRAGMA user_version").fetchone()
+    except sqlite3.Error as exc:
+        raise CliError(f"无法检查 storage schema: {db_path} ({exc})") from exc
+
+    version = int(row[0] if row else 0)
+    if version in (0, SCHEMA_VERSION):
+        return None
+    return (
+        f"storage schema {version} is not supported by this build "
+        f"(expected {SCHEMA_VERSION}, db={db_path}); run `uv run storage rebuild`"
+    )
+
+
 def _wait_until_stopped(pid: int, timeout_sec: float = 5.0) -> bool:
     deadline = time.monotonic() + timeout_sec
     while time.monotonic() < deadline:
@@ -402,6 +422,11 @@ def start() -> int:
     if running and pid is not None:
         print(f"[info] Telegram 已运行，PID={pid}")
         return 0
+
+    schema_error = _unsupported_storage_schema_message(paths.db_file)
+    if schema_error is not None:
+        print(f"[error] {schema_error}")
+        return 1
 
     print("[info] 启动 Telegram 服务...")
     proc = subprocess.Popen(
