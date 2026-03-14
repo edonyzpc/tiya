@@ -1,0 +1,46 @@
+{
+  "name": "tiya-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Desktop control console for tiya",
+  "author": "tiya contributors",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/edonyzpc/tiya",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/edonyzpc/tiya.git"
+  },
+  "main": "dist-electron/electron/main.js",
+  "scripts": {
+    "build": "npm run build:renderer && npm run build:electron",
+    "build:renderer": "vite build",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "build:icons": "node scripts/generate-icons.mjs",
+    "prepare:electron": "node scripts/prepare-electron-runtime.mjs",
+    "build:sidecar": "node scripts/build-sidecar.mjs",
+    "dev": "node scripts/dev.mjs",
+    "start": "electron dist-electron/electron/main.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.electron.json --noEmit",
+    "test:electron": "npm run build:electron && node --test tests/*.test.cjs",
+    "package:dir": "npm run build:icons && npm run prepare:electron && npm run build && npm run build:sidecar && node scripts/run-builder.mjs --dir --publish never",
+    "package:deb": "npm run build:icons && npm run prepare:electron && npm run build && npm run build:sidecar && node scripts/run-builder.mjs --dir --publish never && node scripts/build-deb-manual.mjs",
+    "package:rpm": "npm run build:icons && npm run prepare:electron && npm run build && npm run build:sidecar && node scripts/run-builder.mjs --linux rpm --publish never",
+    "package:linux": "npm run build:icons && npm run prepare:electron && npm run build && npm run build:sidecar && node scripts/run-builder.mjs --linux zip rpm --publish never && node scripts/build-deb-manual.mjs",
+    "package:dmg": "npm run build:icons && npm run prepare:electron && npm run build && npm run build:sidecar && node scripts/run-builder.mjs --mac dmg --publish never",
+    "package:mac": "npm run build:icons && npm run prepare:electron && npm run build && npm run build:sidecar && node scripts/run-builder.mjs --mac zip dmg --publish never"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^35.0.0",
+    "electron-builder": "^24.13.3",
+    "typescript": "^5.8.2",
+    "vite": "^6.2.2"
+  }
+}

@@ -210,3 +210,9 @@ __marimo__/
 # project
 .runtime/*
 .tiya/*
+desktop/node_modules/
+desktop/dist-renderer/
+desktop/dist-electron/
+desktop/.vite/
+desktop/.cache/
+desktop/release/
