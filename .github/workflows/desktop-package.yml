@@ -56,21 +56,12 @@ jobs:
         working-directory: desktop
         run: npm run typecheck
 
-  smoke:
+  smoke-linux-x64:
     if: github.event_name == 'pull_request'
     needs: preflight
-    name: Smoke Linux (${{ matrix.arch }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            arch: x64
-          - runner: ubuntu-24.04-arm
-            arch: arm64
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-24.04
     env:
-      TIYA_DESKTOP_TARGET_ARCH: ${{ matrix.arch }}
+      TIYA_DESKTOP_TARGET_ARCH: x64
     steps:
       - uses: actions/checkout@v4
         with:
@@ -95,7 +86,7 @@ jobs:
       - name: Upload smoke artifact
         uses: actions/upload-artifact@v4
         with:
-          name: desktop-smoke-linux-${{ matrix.arch }}
+          name: desktop-smoke-linux-x64
           path: |
             desktop/release/*.deb
             desktop/release/*.rpm
@@ -103,29 +94,12 @@ jobs:
             desktop/release/linux*-unpacked/**
           if-no-files-found: error
 
-  beta:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+  smoke-linux-arm64-prep:
+    if: github.event_name == 'pull_request'
     needs: preflight
-    name: Beta ${{ matrix.platform }} (${{ matrix.arch }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            platform: linux
-            arch: x64
-            package_script: package:linux
-          - runner: ubuntu-24.04-arm
-            platform: linux
-            arch: arm64
-            package_script: package:linux
-          - runner: macos-15
-            platform: macos
-            arch: universal
-            package_script: package:mac
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-24.04-arm
     env:
-      TIYA_DESKTOP_TARGET_ARCH: ${{ matrix.arch }}
+      TIYA_DESKTOP_TARGET_ARCH: arm64
     steps:
       - uses: actions/checkout@v4
         with:
@@ -144,67 +118,87 @@ jobs:
       - name: Install desktop dependencies
         working-directory: desktop
         run: npm ci --include=optional
-      - name: Compute beta desktop version
-        id: beta_version
-        run: |
-          version="$(.venv/bin/python scripts/version_manager.py beta-version --run-number "${{ github.run_number }}")"
-          echo "value=$version" >> "$GITHUB_OUTPUT"
-      - name: Apply beta desktop version
-        run: .venv/bin/python scripts/version_manager.py set-desktop "${{ steps.beta_version.outputs.value }}"
-      - name: Build beta package
+      - name: Build arm64 smoke package without RPM
         working-directory: desktop
-        run: npm run ${{ matrix.package_script }}
-      - name: Generate Linux checksums
-        if: matrix.platform == 'linux'
+        run: npm run package:linux-no-rpm
+      - name: Archive arm64 unpacked app
         shell: bash
-        run: |
-          sha256sum desktop/release/*.zip desktop/release/*.deb desktop/release/*.rpm > \
-            "desktop/release/SHA256SUMS-${{ matrix.platform }}-${{ matrix.arch }}.txt"
-      - name: Generate macOS checksums
-        if: matrix.platform == 'macos'
-        shell: bash
-        run: |
-          shasum -a 256 desktop/release/*.zip desktop/release/*.dmg > \
-            "desktop/release/SHA256SUMS-${{ matrix.platform }}-${{ matrix.arch }}.txt"
-      - name: Upload beta artifacts
+        run: tar -C desktop/release -czf desktop/release/linux-arm64-unpacked.tar.gz linux-arm64-unpacked
+      - name: Upload arm64 repack input
         uses: actions/upload-artifact@v4
         with:
-          name: beta-desktop-${{ matrix.platform }}-${{ matrix.arch }}-${{ steps.beta_version.outputs.value }}
+          name: desktop-smoke-linux-arm64-prepack
+          path: |
+            desktop/release/*.zip
+            desktop/release/*.deb
+            desktop/release/linux-arm64-unpacked.tar.gz
+          if-no-files-found: error
+
+  smoke-linux-arm64-rpm:
+    if: github.event_name == 'pull_request'
+    needs: smoke-linux-arm64-prep
+    runs-on: ubuntu-24.04
+    env:
+      TIYA_DESKTOP_TARGET_ARCH: arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: desktop/package-lock.json
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm ci --include=optional
+      - name: Download arm64 repack input
+        uses: actions/download-artifact@v4
+        with:
+          name: desktop-smoke-linux-arm64-prepack
+          path: desktop/release
+      - name: Restore arm64 unpacked app
+        shell: bash
+        run: tar -C desktop/release -xzf desktop/release/linux-arm64-unpacked.tar.gz
+      - name: Build arm64 RPM from prepackaged app
+        working-directory: desktop
+        run: npm run package:rpm:prepackaged
+      - name: Upload smoke artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-smoke-linux-arm64
           path: |
             desktop/release/*.zip
             desktop/release/*.deb
             desktop/release/*.rpm
-            desktop/release/*.dmg
-            desktop/release/SHA256SUMS-${{ matrix.platform }}-${{ matrix.arch }}.txt
           if-no-files-found: error
 
-  release:
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+  beta-metadata:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     needs: preflight
-    name: Release Build ${{ matrix.platform }} (${{ matrix.arch }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            platform: linux
-            arch: x64
-            package_script: package:linux
-          - runner: ubuntu-24.04-arm
-            platform: linux
-            arch: arm64
-            package_script: package:linux
-          - runner: macos-15
-            platform: macos
-            arch: universal
-            package_script: package:mac
-    runs-on: ${{ matrix.runner }}
-    env:
-      TIYA_DESKTOP_TARGET_ARCH: ${{ matrix.arch }}
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.beta_version.outputs.value }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          fetch-depth: 0
+          python-version: "3.12"
+      - name: Compute beta desktop version
+        id: beta_version
+        run: |
+          version="$(python scripts/version_manager.py beta-version --run-number "${{ github.run_number }}")"
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+  beta-linux-x64:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs:
+      - beta-metadata
+    runs-on: ubuntu-24.04
+    env:
+      TIYA_DESKTOP_TARGET_ARCH: x64
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -219,10 +213,262 @@ jobs:
       - name: Install desktop dependencies
         working-directory: desktop
         run: npm ci --include=optional
+      - name: Apply beta desktop version
+        run: python scripts/version_manager.py set-desktop "${{ needs.beta-metadata.outputs.version }}"
+      - name: Build beta package
+        working-directory: desktop
+        run: npm run package:linux
+      - name: Generate checksums
+        shell: bash
+        run: |
+          sha256sum desktop/release/*.zip desktop/release/*.deb desktop/release/*.rpm > \
+            desktop/release/SHA256SUMS-linux-x64.txt
+      - name: Upload beta artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: beta-desktop-linux-x64-${{ needs.beta-metadata.outputs.version }}
+          path: |
+            desktop/release/*.zip
+            desktop/release/*.deb
+            desktop/release/*.rpm
+            desktop/release/SHA256SUMS-linux-x64.txt
+          if-no-files-found: error
+
+  beta-linux-arm64-prep:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs:
+      - beta-metadata
+    runs-on: ubuntu-24.04-arm
+    env:
+      TIYA_DESKTOP_TARGET_ARCH: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: desktop/package-lock.json
+      - name: Sync Python dependencies
+        run: uv sync --group dev
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm ci --include=optional
+      - name: Apply beta desktop version
+        run: python scripts/version_manager.py set-desktop "${{ needs.beta-metadata.outputs.version }}"
+      - name: Build beta package without RPM
+        working-directory: desktop
+        run: npm run package:linux-no-rpm
+      - name: Archive arm64 unpacked app
+        shell: bash
+        run: tar -C desktop/release -czf desktop/release/linux-arm64-unpacked.tar.gz linux-arm64-unpacked
+      - name: Upload arm64 repack input
+        uses: actions/upload-artifact@v4
+        with:
+          name: beta-linux-arm64-prepack-${{ needs.beta-metadata.outputs.version }}
+          path: |
+            desktop/release/*.zip
+            desktop/release/*.deb
+            desktop/release/linux-arm64-unpacked.tar.gz
+          if-no-files-found: error
+
+  beta-linux-arm64-rpm:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs:
+      - beta-metadata
+      - beta-linux-arm64-prep
+    runs-on: ubuntu-24.04
+    env:
+      TIYA_DESKTOP_TARGET_ARCH: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: desktop/package-lock.json
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm ci --include=optional
+      - name: Apply beta desktop version
+        run: python scripts/version_manager.py set-desktop "${{ needs.beta-metadata.outputs.version }}"
+      - name: Download arm64 repack input
+        uses: actions/download-artifact@v4
+        with:
+          name: beta-linux-arm64-prepack-${{ needs.beta-metadata.outputs.version }}
+          path: desktop/release
+      - name: Restore arm64 unpacked app
+        shell: bash
+        run: tar -C desktop/release -xzf desktop/release/linux-arm64-unpacked.tar.gz
+      - name: Build arm64 RPM from prepackaged app
+        working-directory: desktop
+        run: npm run package:rpm:prepackaged
+      - name: Generate checksums
+        shell: bash
+        run: |
+          sha256sum desktop/release/*.zip desktop/release/*.deb desktop/release/*.rpm > \
+            desktop/release/SHA256SUMS-linux-arm64.txt
+      - name: Upload beta artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: beta-desktop-linux-arm64-${{ needs.beta-metadata.outputs.version }}
+          path: |
+            desktop/release/*.zip
+            desktop/release/*.deb
+            desktop/release/*.rpm
+            desktop/release/SHA256SUMS-linux-arm64.txt
+          if-no-files-found: error
+
+  beta-macos-sidecars-x64:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs: beta-metadata
+    runs-on: macos-15-intel
+    env:
+      TIYA_DESKTOP_TARGET_ARCH: x64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Sync Python dependencies
+        run: uv sync --group dev
+      - name: Build x64 macOS sidecars
+        working-directory: desktop
+        run: npm run build:sidecar
+      - name: Archive x64 macOS sidecars
+        shell: bash
+        run: |
+          mkdir -p build/ci-artifacts
+          tar -C dist -czf build/ci-artifacts/desktop-sidecars-macos-x64.tar.gz desktop-sidecars
+      - name: Upload x64 macOS sidecars
+        uses: actions/upload-artifact@v4
+        with:
+          name: beta-macos-sidecars-x64
+          path: build/ci-artifacts/desktop-sidecars-macos-x64.tar.gz
+          if-no-files-found: error
+
+  beta-macos-sidecars-arm64:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs: beta-metadata
+    runs-on: macos-15
+    env:
+      TIYA_DESKTOP_TARGET_ARCH: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Sync Python dependencies
+        run: uv sync --group dev
+      - name: Build arm64 macOS sidecars
+        working-directory: desktop
+        run: npm run build:sidecar
+      - name: Archive arm64 macOS sidecars
+        shell: bash
+        run: |
+          mkdir -p build/ci-artifacts
+          tar -C dist -czf build/ci-artifacts/desktop-sidecars-macos-arm64.tar.gz desktop-sidecars
+      - name: Upload arm64 macOS sidecars
+        uses: actions/upload-artifact@v4
+        with:
+          name: beta-macos-sidecars-arm64
+          path: build/ci-artifacts/desktop-sidecars-macos-arm64.tar.gz
+          if-no-files-found: error
+
+  beta-macos-universal:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs:
+      - beta-metadata
+      - beta-macos-sidecars-x64
+      - beta-macos-sidecars-arm64
+    runs-on: macos-15
+    env:
+      TIYA_DESKTOP_TARGET_ARCH: universal
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: desktop/package-lock.json
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm ci --include=optional
+      - name: Apply beta desktop version
+        run: python scripts/version_manager.py set-desktop "${{ needs.beta-metadata.outputs.version }}"
+      - name: Download x64 macOS sidecars
+        uses: actions/download-artifact@v4
+        with:
+          name: beta-macos-sidecars-x64
+          path: build/macos-sidecars/x64
+      - name: Download arm64 macOS sidecars
+        uses: actions/download-artifact@v4
+        with:
+          name: beta-macos-sidecars-arm64
+          path: build/macos-sidecars/arm64
+      - name: Restore macOS sidecar archives
+        shell: bash
+        run: |
+          tar -C build/macos-sidecars/x64 -xzf build/macos-sidecars/x64/desktop-sidecars-macos-x64.tar.gz
+          tar -C build/macos-sidecars/arm64 -xzf build/macos-sidecars/arm64/desktop-sidecars-macos-arm64.tar.gz
+      - name: Prepare macOS universal sidecar bundle
+        working-directory: desktop
+        run: |
+          node scripts/prepare-mac-universal-sidecars.mjs \
+            --x64 ../build/macos-sidecars/x64/desktop-sidecars \
+            --arm64 ../build/macos-sidecars/arm64/desktop-sidecars
+      - name: Build universal beta package
+        working-directory: desktop
+        run: npm run package:mac
+      - name: Generate checksums
+        shell: bash
+        run: |
+          shasum -a 256 desktop/release/*.zip desktop/release/*.dmg > \
+            desktop/release/SHA256SUMS-macos-universal.txt
+      - name: Upload beta artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: beta-desktop-macos-universal-${{ needs.beta-metadata.outputs.version }}
+          path: |
+            desktop/release/*.zip
+            desktop/release/*.dmg
+            desktop/release/SHA256SUMS-macos-universal.txt
+          if-no-files-found: error
+
+  release-metadata:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: preflight
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.release_version.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - name: Verify release tag
         id: release_version
         run: |
-          version="$(.venv/bin/python scripts/version_manager.py verify-tag "${{ github.ref_name }}")"
+          version="$(python scripts/version_manager.py verify-tag "${{ github.ref_name }}")"
           echo "value=$version" >> "$GITHUB_OUTPUT"
       - name: Verify release tag points to master HEAD
         shell: bash
@@ -234,36 +480,259 @@ jobs:
             echo "::error::master=$master_sha tag=$tag_sha"
             exit 1
           fi
+
+  release-linux-x64:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: release-metadata
+    runs-on: ubuntu-24.04
+    env:
+      TIYA_DESKTOP_TARGET_ARCH: x64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: desktop/package-lock.json
+      - name: Sync Python dependencies
+        run: uv sync --group dev
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm ci --include=optional
       - name: Build release package
         working-directory: desktop
-        run: npm run ${{ matrix.package_script }}
-      - name: Generate Linux checksums
-        if: matrix.platform == 'linux'
+        run: npm run package:linux
+      - name: Generate checksums
         shell: bash
         run: |
           sha256sum desktop/release/*.zip desktop/release/*.deb desktop/release/*.rpm > \
-            "desktop/release/SHA256SUMS-${{ matrix.platform }}-${{ matrix.arch }}.txt"
-      - name: Generate macOS checksums
-        if: matrix.platform == 'macos'
-        shell: bash
-        run: |
-          shasum -a 256 desktop/release/*.zip desktop/release/*.dmg > \
-            "desktop/release/SHA256SUMS-${{ matrix.platform }}-${{ matrix.arch }}.txt"
+            desktop/release/SHA256SUMS-linux-x64.txt
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: release-desktop-${{ matrix.platform }}-${{ matrix.arch }}-${{ steps.release_version.outputs.value }}
+          name: release-desktop-linux-x64-${{ needs.release-metadata.outputs.version }}
           path: |
             desktop/release/*.zip
             desktop/release/*.deb
             desktop/release/*.rpm
+            desktop/release/SHA256SUMS-linux-x64.txt
+          if-no-files-found: error
+
+  release-linux-arm64-prep:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: release-metadata
+    runs-on: ubuntu-24.04-arm
+    env:
+      TIYA_DESKTOP_TARGET_ARCH: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: desktop/package-lock.json
+      - name: Sync Python dependencies
+        run: uv sync --group dev
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm ci --include=optional
+      - name: Build release package without RPM
+        working-directory: desktop
+        run: npm run package:linux-no-rpm
+      - name: Archive arm64 unpacked app
+        shell: bash
+        run: tar -C desktop/release -czf desktop/release/linux-arm64-unpacked.tar.gz linux-arm64-unpacked
+      - name: Upload arm64 repack input
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-arm64-prepack-${{ needs.release-metadata.outputs.version }}
+          path: |
+            desktop/release/*.zip
+            desktop/release/*.deb
+            desktop/release/linux-arm64-unpacked.tar.gz
+          if-no-files-found: error
+
+  release-linux-arm64-rpm:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - release-metadata
+      - release-linux-arm64-prep
+    runs-on: ubuntu-24.04
+    env:
+      TIYA_DESKTOP_TARGET_ARCH: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: desktop/package-lock.json
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm ci --include=optional
+      - name: Download arm64 repack input
+        uses: actions/download-artifact@v4
+        with:
+          name: release-linux-arm64-prepack-${{ needs.release-metadata.outputs.version }}
+          path: desktop/release
+      - name: Restore arm64 unpacked app
+        shell: bash
+        run: tar -C desktop/release -xzf desktop/release/linux-arm64-unpacked.tar.gz
+      - name: Build arm64 RPM from prepackaged app
+        working-directory: desktop
+        run: npm run package:rpm:prepackaged
+      - name: Generate checksums
+        shell: bash
+        run: |
+          sha256sum desktop/release/*.zip desktop/release/*.deb desktop/release/*.rpm > \
+            desktop/release/SHA256SUMS-linux-arm64.txt
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-desktop-linux-arm64-${{ needs.release-metadata.outputs.version }}
+          path: |
+            desktop/release/*.zip
+            desktop/release/*.deb
+            desktop/release/*.rpm
+            desktop/release/SHA256SUMS-linux-arm64.txt
+          if-no-files-found: error
+
+  release-macos-sidecars-x64:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: release-metadata
+    runs-on: macos-15-intel
+    env:
+      TIYA_DESKTOP_TARGET_ARCH: x64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Sync Python dependencies
+        run: uv sync --group dev
+      - name: Build x64 macOS sidecars
+        working-directory: desktop
+        run: npm run build:sidecar
+      - name: Archive x64 macOS sidecars
+        shell: bash
+        run: |
+          mkdir -p build/ci-artifacts
+          tar -C dist -czf build/ci-artifacts/desktop-sidecars-macos-x64.tar.gz desktop-sidecars
+      - name: Upload x64 macOS sidecars
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-sidecars-x64
+          path: build/ci-artifacts/desktop-sidecars-macos-x64.tar.gz
+          if-no-files-found: error
+
+  release-macos-sidecars-arm64:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: release-metadata
+    runs-on: macos-15
+    env:
+      TIYA_DESKTOP_TARGET_ARCH: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Sync Python dependencies
+        run: uv sync --group dev
+      - name: Build arm64 macOS sidecars
+        working-directory: desktop
+        run: npm run build:sidecar
+      - name: Archive arm64 macOS sidecars
+        shell: bash
+        run: |
+          mkdir -p build/ci-artifacts
+          tar -C dist -czf build/ci-artifacts/desktop-sidecars-macos-arm64.tar.gz desktop-sidecars
+      - name: Upload arm64 macOS sidecars
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-sidecars-arm64
+          path: build/ci-artifacts/desktop-sidecars-macos-arm64.tar.gz
+          if-no-files-found: error
+
+  release-macos-universal:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - release-metadata
+      - release-macos-sidecars-x64
+      - release-macos-sidecars-arm64
+    runs-on: macos-15
+    env:
+      TIYA_DESKTOP_TARGET_ARCH: universal
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: desktop/package-lock.json
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm ci --include=optional
+      - name: Download x64 macOS sidecars
+        uses: actions/download-artifact@v4
+        with:
+          name: release-macos-sidecars-x64
+          path: build/macos-sidecars/x64
+      - name: Download arm64 macOS sidecars
+        uses: actions/download-artifact@v4
+        with:
+          name: release-macos-sidecars-arm64
+          path: build/macos-sidecars/arm64
+      - name: Restore macOS sidecar archives
+        shell: bash
+        run: |
+          tar -C build/macos-sidecars/x64 -xzf build/macos-sidecars/x64/desktop-sidecars-macos-x64.tar.gz
+          tar -C build/macos-sidecars/arm64 -xzf build/macos-sidecars/arm64/desktop-sidecars-macos-arm64.tar.gz
+      - name: Prepare macOS universal sidecar bundle
+        working-directory: desktop
+        run: |
+          node scripts/prepare-mac-universal-sidecars.mjs \
+            --x64 ../build/macos-sidecars/x64/desktop-sidecars \
+            --arm64 ../build/macos-sidecars/arm64/desktop-sidecars
+      - name: Build universal release package
+        working-directory: desktop
+        run: npm run package:mac
+      - name: Generate checksums
+        shell: bash
+        run: |
+          shasum -a 256 desktop/release/*.zip desktop/release/*.dmg > \
+            desktop/release/SHA256SUMS-macos-universal.txt
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-desktop-macos-universal-${{ needs.release-metadata.outputs.version }}
+          path: |
+            desktop/release/*.zip
             desktop/release/*.dmg
-            desktop/release/SHA256SUMS-${{ matrix.platform }}-${{ matrix.arch }}.txt
+            desktop/release/SHA256SUMS-macos-universal.txt
           if-no-files-found: error
 
   publish-release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: release
+    needs:
+      - release-linux-x64
+      - release-linux-arm64-rpm
+      - release-macos-universal
     runs-on: ubuntu-24.04
     permissions:
       contents: write

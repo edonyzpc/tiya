@@ -21,9 +21,10 @@ Examples from the repo root:
 - Build a Linux installable package with `npm run package:deb`.
 - Build a Linux RPM package with `npm run package:rpm`.
 - Build Linux preview artifacts with `npm run package:linux` to produce `zip + deb + rpm`.
-- Build a macOS universal DMG with `npm run package:dmg`.
-- Build macOS universal preview artifacts with `npm run package:mac` to produce `zip + dmg`.
-- Sidecar binaries are produced into `../dist/desktop-sidecars/` before Electron packaging runs.
+- Build a macOS universal DMG with `npm run package:dmg` after preparing both macOS sidecar variants.
+- Build macOS universal preview artifacts with `npm run package:mac` to produce `zip + dmg` after preparing both macOS sidecar variants.
+- Linux `arm64` RPM builds are repackaged from a preserved `linux-arm64-unpacked` bundle on an `x64` runner because `electron-builder`'s bundled `fpm` is not runnable on native Linux `arm64` GitHub-hosted runners.
+- macOS universal packages are assembled from separately built `x64` and `arm64` sidecar bundles plus a small runtime wrapper under `../dist/desktop-sidecars/`.
 - The same packaging flows are available from the repo root with `uv run desktop package dir|deb|rpm|linux|dmg|mac`.
 - Install the generated Debian package with `sudo apt install ./desktop/release/tiya-0.1.2-linux-<amd64|arm64>.deb`.
 - Linux secret storage requires `secret-tool`; on Debian/Ubuntu install it with `sudo apt install libsecret-tools`.
@@ -39,7 +40,7 @@ Examples from the repo root:
 ## CI Release Flow
 
 - GitHub Actions workflow: [`../.github/workflows/desktop-package.yml`](../.github/workflows/desktop-package.yml)
-- Pull requests into `master` run Linux smoke packaging on both `x64` and `arm64`, producing `zip + deb + rpm`.
-- Pushes to `master` build beta installables for Linux `x64/arm64` and macOS `universal`, then upload workflow artifacts plus per-platform `SHA256SUMS`.
+- Pull requests into `master` run Linux smoke packaging on `x64` directly and on `arm64` through `prepackaged` RPM repacking, producing `zip + deb + rpm`.
+- Pushes to `master` build beta installables for Linux `x64/arm64` and macOS `universal`; macOS universal artifacts are assembled from separate Intel and Apple Silicon sidecar jobs before upload.
 - Beta builds temporarily rewrite only the desktop package version to `X.Y.Z-beta.<run_number>` so installables are distinguishable during testing.
 - Pushes of tags matching `v*` rebuild the release installables, verify the tag matches the committed stable version and points to `master` HEAD, and publish the resulting assets to GitHub Releases.

@@ -25,7 +25,9 @@
     "package:dir": "npm run build:icons && npm run prepare:electron && npm run build && npm run build:sidecar && node scripts/run-builder.mjs --dir --publish never",
     "package:deb": "npm run build:icons && npm run prepare:electron && npm run build && npm run build:sidecar && node scripts/run-builder.mjs --dir --publish never && node scripts/build-deb-manual.mjs",
     "package:rpm": "npm run build:icons && npm run prepare:electron && npm run build && npm run build:sidecar && node scripts/run-builder.mjs --linux rpm --publish never",
+    "package:rpm:prepackaged": "node scripts/build-rpm-prepackaged.mjs",
     "package:linux": "npm run build:icons && npm run prepare:electron && npm run build && npm run build:sidecar && node scripts/run-builder.mjs --linux zip rpm --publish never && node scripts/build-deb-manual.mjs",
+    "package:linux-no-rpm": "npm run build:icons && npm run prepare:electron && npm run build && npm run build:sidecar && node scripts/run-builder.mjs --linux zip --publish never && node scripts/build-deb-manual.mjs",
     "package:dmg": "node scripts/package-mac.mjs dmg",
     "package:mac": "node scripts/package-mac.mjs zip dmg"
   },

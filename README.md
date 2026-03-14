@@ -182,6 +182,8 @@ uv run restart
 - `master` is the primary branch. Changes land through pull requests after review or owner confirmation.
 - `PR Validation` runs the Python test suite for pull requests targeting `master`.
 - Every merge into `master` triggers the desktop packaging workflow and produces beta installables for Linux `x64/arm64` and macOS `universal`.
+- Linux `arm64` RPMs are repacked from an `arm64` unpacked bundle on an `x64` runner so the workflow does not depend on `electron-builder`'s x86-only bundled `fpm` on Linux `arm64`.
+- macOS universal artifacts are assembled from separately built Intel and Apple Silicon sidecar bundles, then wrapped into one universal `zip` and `dmg`.
 - Stable release versions are maintained manually in the repo through `scripts/version_manager.py`, which keeps `pyproject.toml`, `src/__init__.py`, `desktop/package.json`, and `desktop/package-lock.json` in sync.
 - Recommended release prep:
   - `uv run python scripts/version_manager.py set 0.2.0`

@@ -41,7 +41,11 @@ def resolve_pyinstaller_target_arch(
     if system != "Darwin":
         return None
 
-    raw_arch = (requested_arch or os.environ.get("TIYA_DESKTOP_TARGET_ARCH") or "universal").strip()
+    raw_arch = (
+        requested_arch
+        or os.environ.get("TIYA_DESKTOP_TARGET_ARCH")
+        or platform.machine()
+    ).strip()
     target_arch = MACOS_TARGET_ARCH_MAP.get(raw_arch)
     if target_arch is None:
         supported = ", ".join(sorted(MACOS_TARGET_ARCH_MAP))

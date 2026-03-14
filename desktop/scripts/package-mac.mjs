@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { access } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 
@@ -38,12 +39,34 @@ async function run(command, args) {
   });
 }
 
+async function ensurePreparedSidecars() {
+  const expectedFiles = [
+    path.join(desktopRoot, "..", "dist", "desktop-sidecars", "tiya-supervisor", "tiya-supervisor"),
+    path.join(desktopRoot, "..", "dist", "desktop-sidecars", "tiya-supervisor", "macos-x64", "tiya-supervisor"),
+    path.join(desktopRoot, "..", "dist", "desktop-sidecars", "tiya-supervisor", "macos-arm64", "tiya-supervisor"),
+    path.join(desktopRoot, "..", "dist", "desktop-sidecars", "tiya-worker", "tiya-worker"),
+    path.join(desktopRoot, "..", "dist", "desktop-sidecars", "tiya-worker", "macos-x64", "tiya-worker"),
+    path.join(desktopRoot, "..", "dist", "desktop-sidecars", "tiya-worker", "macos-arm64", "tiya-worker")
+  ];
+
+  for (const targetPath of expectedFiles) {
+    try {
+      await access(targetPath);
+    } catch {
+      throw new Error(
+        `Missing prepared macOS universal sidecar asset: ${targetPath}. ` +
+          "Build and stage both macOS sidecar variants before packaging."
+      );
+    }
+  }
+}
+
 const npm = commandForNpm();
 
 await run(npm, ["run", "build:icons"]);
 await run(npm, ["run", "prepare:electron"]);
 await run(npm, ["run", "build"]);
-await run(npm, ["run", "build:sidecar"]);
+await ensurePreparedSidecars();
 await run(process.execPath, [
   "scripts/run-builder.mjs",
   "--mac",
