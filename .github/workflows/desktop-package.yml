@@ -1,45 +1,41 @@
 name: Desktop Package
 
 on:
-  workflow_dispatch:
   pull_request:
+    branches:
+      - master
     paths:
       - "desktop/**"
       - "packaging/**"
+      - "scripts/**"
       - "src/**"
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/desktop-package.yml"
   push:
     branches:
-      - main
+      - master
     tags:
-      - "desktop-v*"
+      - "v*"
     paths:
       - "desktop/**"
       - "packaging/**"
+      - "scripts/**"
       - "src/**"
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/desktop-package.yml"
 
+permissions:
+  contents: read
+
 jobs:
-  smoke:
-    if: github.event_name == 'pull_request' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/'))
-    name: Smoke Linux (${{ matrix.arch }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            arch: x64
-          - runner: ubuntu-24.04-arm
-            arch: arm64
-    runs-on: ${{ matrix.runner }}
-    env:
-      TIYA_DESKTOP_TARGET_ARCH: ${{ matrix.arch }}
+  preflight:
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -59,6 +55,40 @@ jobs:
       - name: Typecheck desktop
         working-directory: desktop
         run: npm run typecheck
+
+  smoke:
+    if: github.event_name == 'pull_request'
+    needs: preflight
+    name: Smoke Linux (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    env:
+      TIYA_DESKTOP_TARGET_ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: desktop/package-lock.json
+      - name: Sync Python dependencies
+        run: uv sync --group dev
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm ci
       - name: Build smoke package
         working-directory: desktop
         run: npm run package:linux
@@ -73,9 +103,10 @@ jobs:
             desktop/release/linux*-unpacked/**
           if-no-files-found: error
 
-  release:
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/desktop-v')
-    name: Release ${{ matrix.platform }} (${{ matrix.arch }})
+  beta:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs: preflight
+    name: Beta ${{ matrix.platform }} (${{ matrix.arch }})
     strategy:
       fail-fast: false
       matrix:
@@ -101,6 +132,8 @@ jobs:
       TIYA_DESKTOP_TARGET_ARCH: ${{ matrix.arch }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -115,35 +148,148 @@ jobs:
       - name: Install desktop dependencies
         working-directory: desktop
         run: npm ci
-      - name: Build desktop release
+      - name: Compute beta desktop version
+        id: beta_version
+        run: |
+          version="$(.venv/bin/python scripts/version_manager.py beta-version --run-number "${{ github.run_number }}")"
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+      - name: Apply beta desktop version
+        run: .venv/bin/python scripts/version_manager.py set-desktop "${{ steps.beta_version.outputs.value }}"
+      - name: Build beta package
         working-directory: desktop
         run: npm run ${{ matrix.package_script }}
       - name: Generate Linux checksums
         if: matrix.platform == 'linux'
         shell: bash
-        run: sha256sum desktop/release/*.zip desktop/release/*.deb desktop/release/*.rpm > desktop/release/SHA256SUMS.txt
+        run: |
+          sha256sum desktop/release/*.zip desktop/release/*.deb desktop/release/*.rpm > \
+            "desktop/release/SHA256SUMS-${{ matrix.platform }}-${{ matrix.arch }}.txt"
       - name: Generate macOS checksums
         if: matrix.platform == 'macos'
         shell: bash
-        run: shasum -a 256 desktop/release/*.zip desktop/release/*.dmg > desktop/release/SHA256SUMS.txt
-      - name: Upload Linux preview artifacts
-        if: matrix.platform == 'linux'
+        run: |
+          shasum -a 256 desktop/release/*.zip desktop/release/*.dmg > \
+            "desktop/release/SHA256SUMS-${{ matrix.platform }}-${{ matrix.arch }}.txt"
+      - name: Upload beta artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: linux-desktop-preview-${{ matrix.arch }}
+          name: beta-desktop-${{ matrix.platform }}-${{ matrix.arch }}-${{ steps.beta_version.outputs.value }}
           path: |
             desktop/release/*.zip
             desktop/release/*.deb
             desktop/release/*.rpm
-            desktop/release/SHA256SUMS.txt
+            desktop/release/*.dmg
+            desktop/release/SHA256SUMS-${{ matrix.platform }}-${{ matrix.arch }}.txt
           if-no-files-found: error
-      - name: Upload macOS preview artifacts
+
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: preflight
+    name: Release Build ${{ matrix.platform }} (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux
+            arch: x64
+            package_script: package:linux
+          - runner: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+            package_script: package:linux
+          - runner: macos-15
+            platform: macos
+            arch: arm64
+            package_script: package:mac
+          - runner: macos-15-intel
+            platform: macos
+            arch: x64
+            package_script: package:mac
+    runs-on: ${{ matrix.runner }}
+    env:
+      TIYA_DESKTOP_TARGET_ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: desktop/package-lock.json
+      - name: Sync Python dependencies
+        run: uv sync --group dev
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm ci
+      - name: Verify release tag
+        id: release_version
+        run: |
+          version="$(.venv/bin/python scripts/version_manager.py verify-tag "${{ github.ref_name }}")"
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+      - name: Verify release tag points to master HEAD
+        shell: bash
+        run: |
+          master_sha="$(git rev-parse origin/master)"
+          tag_sha="$(git rev-parse HEAD)"
+          if [ "$tag_sha" != "$master_sha" ]; then
+            echo "::error::Release tags must point to the latest commit on master."
+            echo "::error::master=$master_sha tag=$tag_sha"
+            exit 1
+          fi
+      - name: Build release package
+        working-directory: desktop
+        run: npm run ${{ matrix.package_script }}
+      - name: Generate Linux checksums
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          sha256sum desktop/release/*.zip desktop/release/*.deb desktop/release/*.rpm > \
+            "desktop/release/SHA256SUMS-${{ matrix.platform }}-${{ matrix.arch }}.txt"
+      - name: Generate macOS checksums
         if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          shasum -a 256 desktop/release/*.zip desktop/release/*.dmg > \
+            "desktop/release/SHA256SUMS-${{ matrix.platform }}-${{ matrix.arch }}.txt"
+      - name: Upload release artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: macos-desktop-preview-${{ matrix.arch }}
+          name: release-desktop-${{ matrix.platform }}-${{ matrix.arch }}-${{ steps.release_version.outputs.value }}
           path: |
             desktop/release/*.zip
+            desktop/release/*.deb
+            desktop/release/*.rpm
             desktop/release/*.dmg
-            desktop/release/SHA256SUMS.txt
+            desktop/release/SHA256SUMS-${{ matrix.platform }}-${{ matrix.arch }}.txt
           if-no-files-found: error
+
+  publish-release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-desktop-*
+          path: release-assets
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            release-assets/**/*.zip
+            release-assets/**/*.deb
+            release-assets/**/*.rpm
+            release-assets/**/*.dmg
+            release-assets/**/SHA256SUMS-*.txt

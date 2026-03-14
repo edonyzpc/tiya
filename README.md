@@ -177,6 +177,21 @@ uv run restart
 .venv/bin/pytest tests/test_session_store.py -q
 ```
 
+## Versioning and Release
+
+- `master` is the primary branch. Changes land through pull requests after review or owner confirmation.
+- `PR Validation` runs the Python test suite for pull requests targeting `master`.
+- Every merge into `master` triggers the desktop packaging workflow and produces beta installables for Linux `x64/arm64` and macOS `x64/arm64`.
+- Stable release versions are maintained manually in the repo through `scripts/version_manager.py`, which keeps `pyproject.toml`, `src/__init__.py`, `desktop/package.json`, and `desktop/package-lock.json` in sync.
+- Recommended release prep:
+  - `uv run python scripts/version_manager.py set 0.2.0`
+  - open and merge the release PR into `master`
+  - validate the beta workflow artifacts generated from that merge
+  - tag the latest tested `master` commit with `v0.2.0` and push the tag
+- Beta workflows derive a temporary desktop package version like `0.2.0-beta.<run_number>` without changing the committed Python version.
+- Tag pushes matching `v*` verify that the tag matches the stable repo version and points to the latest `master` commit, then rebuild the signed-off installables and publish them as GitHub Release assets.
+- Protect `master` in GitHub so merges require `PR Validation`. If you also require `Desktop Package`, scope it to the desktop-related rules that need it.
+
 ## Notes
 
 - Legacy env `TELEGRAM_ENABLE_DRAFT_STREAM` is still honored when `TG_STREAM_ENABLED` is unset.

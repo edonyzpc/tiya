@@ -177,6 +177,21 @@ uv run restart
 .venv/bin/pytest tests/test_session_store.py -q
 ```
 
+## 版本与发布流程
+
+- `master` 是主分支。所有改动都通过 PR 合入，并经过 review 或 owner 确认。
+- 面向 `master` 的 PR 会触发 `PR Validation`，执行 Python 测试。
+- 每次合并到 `master` 后，桌面打包 workflow 会自动构建 Linux `x64/arm64` 与 macOS `x64/arm64` 的 beta 安装包用于测试。
+- 稳定版本号通过 `scripts/version_manager.py` 手动维护，它会同步 `pyproject.toml`、`src/__init__.py`、`desktop/package.json` 和 `desktop/package-lock.json`。
+- 推荐的发版准备流程：
+  - `uv run python scripts/version_manager.py set 0.2.0`
+  - 提交并通过 PR 合入 `master`
+  - 验证这次合并生成的 beta workflow artifacts
+  - 在已经验证过的最新 `master` commit 上打 `v0.2.0` tag 并推送
+- beta workflow 只会临时把桌面包版本改成 `0.2.0-beta.<run_number>` 这类形式，不会改动仓库里提交的 Python 稳定版本。
+- 推送 `v*` tag 后，workflow 会先校验 tag 和仓库里的稳定版本一致，且 tag 指向最新的 `master` commit，再构建正式安装包并发布到 GitHub Release。
+- 建议在 GitHub 上为 `master` 配置分支保护，至少要求 `PR Validation` 通过；如果把 `Desktop Package` 设为必过检查，最好只在桌面相关规则里启用。
+
 ## 备注
 
 - 当 `TG_STREAM_ENABLED` 未设置时，仍兼容旧变量 `TELEGRAM_ENABLE_DRAFT_STREAM`。
