@@ -466,6 +466,43 @@ jobs:
             desktop/release/SHA256SUMS-macos-universal.txt
           if-no-files-found: error
 
+  publish-beta:
+    name: Publish Beta
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs:
+      - beta-metadata
+      - beta-linux-x64
+      - beta-linux-arm64-rpm
+      - beta-macos-universal
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download beta artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: beta-desktop-*-${{ needs.beta-metadata.outputs.version }}
+          path: beta-assets
+      - name: Publish GitHub beta release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: desktop-beta-${{ needs.beta-metadata.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: Desktop Beta ${{ needs.beta-metadata.outputs.version }}
+          prerelease: true
+          fail_on_unmatched_files: true
+          overwrite_files: true
+          body: |
+            Automated beta desktop packages for `${{ needs.beta-metadata.outputs.version }}` built from `${{ github.sha }}`.
+
+            These assets are intended for real installation testing before a stable `v*` release is tagged.
+          files: |
+            beta-assets/**/*.zip
+            beta-assets/**/*.deb
+            beta-assets/**/*.rpm
+            beta-assets/**/*.dmg
+            beta-assets/**/SHA256SUMS-*.txt
+
   release-metadata:
     name: Release Metadata
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')

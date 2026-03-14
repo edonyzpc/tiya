@@ -141,6 +141,19 @@ for (const samplePath of samplePaths) {{
     )
 
 
+def test_beta_workflow_publishes_github_prerelease():
+    repo_root = Path(__file__).resolve().parent.parent
+    workflow = (repo_root / ".github" / "workflows" / "desktop-package.yml").read_text(encoding="utf-8")
+
+    beta_publish = workflow.split("  publish-beta:\n", maxsplit=1)[1].split("  release-metadata:\n", maxsplit=1)[0]
+    assert "name: Publish Beta" in beta_publish
+    assert "pattern: beta-desktop-*-${{ needs.beta-metadata.outputs.version }}" in beta_publish
+    assert "uses: softprops/action-gh-release@v2" in beta_publish
+    assert "tag_name: desktop-beta-${{ needs.beta-metadata.outputs.version }}" in beta_publish
+    assert "prerelease: true" in beta_publish
+    assert "beta-assets/**/*.dmg" in beta_publish
+
+
 def _load_sidecar_builder():
     script_path = Path(__file__).resolve().parent.parent / "packaging" / "build_desktop_sidecars.py"
     spec = importlib.util.spec_from_file_location("test_build_desktop_sidecars", script_path)

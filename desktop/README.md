@@ -42,5 +42,6 @@ Examples from the repo root:
 - GitHub Actions workflow: [`../.github/workflows/desktop-package.yml`](../.github/workflows/desktop-package.yml)
 - Pull requests into `master` run Linux smoke packaging on `x64` directly and on `arm64` through `prepackaged` RPM repacking, producing `zip + deb + rpm`.
 - Pushes to `master` build beta installables for Linux `x64/arm64` and macOS `universal`; macOS universal artifacts are assembled from separate Intel and Apple Silicon sidecar jobs before upload.
+- The workflow also publishes each beta build to GitHub Releases as a prerelease tagged `desktop-beta-X.Y.Z-beta.N`, so installation test packages can be downloaded without opening the Actions artifact view.
 - Beta builds temporarily rewrite only the desktop package version to `X.Y.Z-beta.<run_number>` so installables are distinguishable during testing.
 - Pushes of tags matching `v*` rebuild the release installables, verify the tag matches the committed stable version and points to `master` HEAD, and publish the resulting assets to GitHub Releases.

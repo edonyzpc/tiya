@@ -184,6 +184,7 @@ uv run restart
 - 每次合并到 `master` 后，桌面打包 workflow 会自动构建 Linux `x64/arm64` 与 macOS `universal` 的 beta 安装包用于测试。
 - Linux `arm64` 的 RPM 会先在 `arm64` runner 上生成 unpacked 应用，再在 `x64` runner 上 repack，避免依赖 `electron-builder` 在 Linux `arm64` 上不可执行的内置 `fpm`。
 - macOS `universal` 安装包会先分别构建 Intel 与 Apple Silicon 的 sidecar，再合成为一个 universal `zip` / `dmg`。
+- 每个 beta 构建还会额外发布成一个 GitHub prerelease，tag 形如 `desktop-beta-X.Y.Z-beta.N`，这样测试安装包可以直接从 Releases 页面下载。
 - 稳定版本号通过 `scripts/version_manager.py` 手动维护，它会同步 `pyproject.toml`、`src/__init__.py`、`desktop/package.json` 和 `desktop/package-lock.json`。
 - 推荐的发版准备流程：
   - `uv run python scripts/version_manager.py set 0.2.0`
