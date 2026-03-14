@@ -11,6 +11,7 @@ from src.instance_lock import BotInstanceLock
 from src.process_utils import ProcessSnapshot
 from src.runtime_paths import RuntimePaths
 from src.services.storage import StorageConfig, StorageManager
+from src.supervisor_client import SupervisorUnavailableError
 
 
 def test_parse_dotenv_line_handles_export_quote_and_comment():
@@ -75,6 +76,20 @@ def test_proxy_is_optional(monkeypatch):
     assert "https_proxy" not in child_env
     assert "HTTP_PROXY" not in child_env
     assert "http_proxy" not in child_env
+
+
+def test_is_pid_running_accepts_packaged_worker(monkeypatch):
+    monkeypatch.setattr(
+        cli,
+        "read_process_snapshot",
+        lambda pid: ProcessSnapshot(
+            pid=pid,
+            stat="S",
+            cmdline="/opt/tiya/resources/tiya-backend/tiya-worker/tiya-worker",
+        ),
+    )
+
+    assert cli._is_pid_running(43210) is True
 
 
 def test_tg_is_running_removes_stale_pid(monkeypatch, tmp_path: Path):
@@ -222,6 +237,20 @@ def test_start_rejects_unsupported_storage_schema_before_launch(monkeypatch, tmp
     assert "popen_called" not in called
 
 
+def test_wait_for_ready_prefers_worker_state(tmp_path: Path):
+    token = "123456:abcdefghijklmnopqrstuvwxyz12345"
+    paths = RuntimePaths.for_token(token, {"TIYA_HOME": str(tmp_path)})
+    paths.instance_dir.mkdir(parents=True, exist_ok=True)
+    paths.worker_state_file.write_text('{"phase":"running","readyAt":123}', encoding="utf-8")
+
+    class _Proc:
+        @staticmethod
+        def poll():
+            return None
+
+    assert cli._wait_for_ready(_Proc(), paths, timeout_sec=0.2) is True
+
+
 def test_is_pid_running_rejects_zombie_snapshot(monkeypatch):
     monkeypatch.setattr(
         "src.cli.read_process_snapshot",
@@ -338,3 +367,62 @@ def test_storage_cli_rebuild_uses_config_and_prints_backup(monkeypatch, tmp_path
     assert called["db_path"] == runtime_paths.db_file
     assert called["instance_id"] == runtime_paths.instance_name
     assert called["attachments_root"] == runtime_paths.attachments_dir
+
+
+def test_top_level_diagnostics_report_attaches_to_supervisor(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_bootstrap", lambda verbose=True: None)
+    monkeypatch.setattr(cli, "_rpc_call", lambda method, params=None: {"method": method, "params": params or {}})
+
+    rc = cli.main(["diagnostics", "report"])
+    out = capsys.readouterr().out.strip()
+
+    assert rc == 0
+    assert '"method": "diagnostics.report"' in out
+
+
+def test_top_level_diagnostics_export_forwards_destination(monkeypatch, capsys, tmp_path: Path):
+    monkeypatch.setattr(cli, "_bootstrap", lambda verbose=True: None)
+    monkeypatch.setattr(cli, "_rpc_call", lambda method, params=None: {"method": method, "params": params or {}})
+
+    destination = tmp_path / "doctor.zip"
+    rc = cli.main(["diagnostics", "export", str(destination)])
+    out = capsys.readouterr().out.strip()
+
+    assert rc == 0
+    assert '"method": "diagnostics.export"' in out
+    assert str(destination) in out
+
+
+def test_public_status_reports_supervisor_unavailable_without_booting(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_bootstrap", lambda verbose=True: None)
+    monkeypatch.setattr(
+        cli,
+        "call_rpc",
+        lambda method, params=None, environ=None: (_ for _ in ()).throw(
+            SupervisorUnavailableError("desktop-owned supervisor is unavailable: /tmp/tiya.sock")
+        ),
+    )
+
+    rc = cli.main(["status"])
+    out = capsys.readouterr().out
+
+    assert rc == 1
+    assert "desktop-owned supervisor is unavailable" in out
+
+
+def test_ctl_service_status_returns_structured_supervisor_unavailable(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_bootstrap", lambda verbose=True: None)
+    monkeypatch.setattr(
+        cli,
+        "call_rpc",
+        lambda method, params=None, environ=None: (_ for _ in ()).throw(
+            SupervisorUnavailableError("desktop-owned supervisor is unavailable: /tmp/tiya.sock")
+        ),
+    )
+
+    rc = cli.main(["ctl", "service", "status"])
+    out = capsys.readouterr().out
+
+    assert rc == 1
+    assert '"code": "supervisor_unavailable"' in out
+    assert "desktop-owned supervisor is unavailable" in out

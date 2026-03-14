@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import os
 import re
 import shutil
@@ -14,6 +15,15 @@ from pathlib import Path
 from typing import Callable, MutableMapping, Optional
 
 from .config import load_config
+from .supervisor_client import (
+    RpcResponseError,
+    SupervisorClientError,
+    SupervisorSubscription,
+    SupervisorUnavailableError,
+    call_rpc,
+    shutdown_supervisor,
+    supervisor_pid,
+)
 from .instance_lock import BotInstanceLock
 from .process_utils import pid_exists, read_process_snapshot
 from .provider_defaults import (
@@ -25,6 +35,7 @@ from .provider_defaults import (
 from .runtime_paths import RuntimePaths, list_runtime_instances, resolve_runtime_home
 from .services.storage import StorageConfig, StorageManager
 from .services.storage.schema import SCHEMA_VERSION
+from .worker_state import read_state
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -34,6 +45,7 @@ READY_MARKER = "tiya service ready"
 TOKEN_RE = re.compile(r"^[0-9]{6,}:[A-Za-z0-9_-]{20,}$")
 USER_IDS_RE = re.compile(r"^[0-9]+(,[0-9]+)*$")
 MODULE_CMD_RE = re.compile(r"(^|\s)-m\s+src(\s|$)")
+PACKAGED_WORKER_CMD_RE = re.compile(r"(^|[\s/\\\\])tiya-worker(?:\.exe)?(\s|$)")
 
 PROXY_PRIORITY = ("TG_PROXY_URL", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")
 PROXY_NORMALIZED_KEYS = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")
@@ -88,13 +100,15 @@ def _parse_dotenv_line(line: str) -> Optional[tuple[str, str]]:
     return key, value
 
 
-def load_dotenv() -> None:
+def load_dotenv(*, verbose: bool = True) -> None:
     env_file = _get_env_file()
     if not env_file.is_file():
-        print("[info] 未找到 .env，继续使用当前 shell 环境变量")
+        if verbose:
+            print("[info] 未找到 .env，继续使用当前 shell 环境变量")
         return
 
-    print(f"[info] 加载环境文件: {env_file}")
+    if verbose:
+        print(f"[info] 加载环境文件: {env_file}")
     for line in env_file.read_text(encoding="utf-8").splitlines():
         parsed = _parse_dotenv_line(line)
         if not parsed:
@@ -229,6 +243,8 @@ def _cmdline_matches(cmdline: str) -> bool:
     if not cmdline:
         return False
     if MODULE_CMD_RE.search(cmdline):
+        return True
+    if PACKAGED_WORKER_CMD_RE.search(cmdline):
         return True
     return "tiya.py" in cmdline
 
@@ -384,14 +400,17 @@ def _wait_until_stopped(pid: int, timeout_sec: float = 5.0) -> bool:
 
 def _wait_for_ready(proc: subprocess.Popen[bytes], paths: RuntimePaths, timeout_sec: float = 10.0) -> bool:
     deadline = time.monotonic() + timeout_sec
-    last_seen = 0
     while time.monotonic() < deadline:
-        if proc.poll() is not None:
+        worker_state = read_state(paths.worker_state_file)
+        phase = worker_state.get("phase")
+        if phase == "running":
+            return True
+        if phase == "crashed":
             return False
+        if proc.poll() is not None:
+            return phase == "running"
         if paths.log_file.is_file():
             lines = _tail_last_lines(paths.log_file, lines=40)
-            if lines:
-                last_seen = len(lines)
             if any(READY_MARKER in line for line in lines):
                 return True
         time.sleep(0.2)
@@ -429,8 +448,10 @@ def start() -> int:
         return 1
 
     print("[info] 启动 Telegram 服务...")
+    worker_executable = _env_value(os.environ, "TIYA_WORKER_EXECUTABLE")
+    cmd = [worker_executable] if worker_executable else [sys.executable, "-m", BOT_MODULE]
     proc = subprocess.Popen(
-        [sys.executable, "-m", BOT_MODULE],
+        cmd,
         cwd=str(REPO_ROOT),
         env=child_env,
         stdin=subprocess.DEVNULL,
@@ -612,14 +633,14 @@ def storage() -> int:
     return int(asyncio.run(_run_storage()))
 
 
-def _bootstrap() -> None:
-    load_dotenv()
+def _bootstrap(*, verbose: bool = True) -> None:
+    load_dotenv(verbose=verbose)
     normalize_proxy_env(os.environ)
 
 
-def _run(command: Callable[[], int]) -> int:
+def _run(command: Callable[[], int], *, verbose: bool = True) -> int:
     try:
-        _bootstrap()
+        _bootstrap(verbose=verbose)
         return int(command())
     except CliError as exc:
         print(f"[error] {exc}")
@@ -627,24 +648,397 @@ def _run(command: Callable[[], int]) -> int:
 
 
 def entry_start() -> int:
-    return _run(start)
+    return main(["start"])
 
 
 def entry_stop() -> int:
-    return _run(stop)
+    return main(["stop"])
 
 
 def entry_restart() -> int:
-    return _run(restart)
+    return main(["restart"])
 
 
 def entry_status() -> int:
-    return _run(status)
+    return main(["status"])
 
 
 def entry_logs() -> int:
-    return _run(logs)
+    return main(["logs"])
 
 
 def entry_storage() -> int:
     return _run(storage)
+
+
+def _write_json(payload: object) -> None:
+    print(json.dumps(payload, ensure_ascii=False))
+
+
+def _read_json_input() -> object:
+    raw = sys.stdin.read()
+    if not raw.strip():
+        raise CliError("stdin is empty; expected a JSON payload")
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise CliError(f"invalid JSON payload: {exc}") from exc
+
+
+def _read_secret_input(explicit: Optional[str]) -> str:
+    if explicit is not None and explicit.strip():
+        return explicit.strip()
+    raw = sys.stdin.read().strip()
+    if not raw:
+        raise CliError("missing secret value")
+    return raw
+
+
+def _status_prefix(phase: str) -> str:
+    if phase == "running":
+        return "[ok]"
+    if phase in {"crashed", "schema_mismatch", "misconfigured"}:
+        return "[error]"
+    return "[info]"
+
+
+def _print_service_status(status_payload: dict[str, object]) -> None:
+    phase = str(status_payload.get("phase") or "unknown")
+    prefix = _status_prefix(phase)
+    print(f"{prefix} tiya service phase={phase}")
+
+    desktop_pid_value = status_payload.get("desktopPid")
+    supervisor_pid_value = status_payload.get("supervisorPid")
+    worker_pid_value = status_payload.get("workerPid")
+    launch_id_value = status_payload.get("launchId")
+    worker_started_at_value = status_payload.get("workerStartedAt")
+    if isinstance(desktop_pid_value, int):
+        print(f"[info] desktop pid={desktop_pid_value}")
+    if isinstance(supervisor_pid_value, int):
+        print(f"[info] supervisor pid={supervisor_pid_value}")
+    if isinstance(worker_pid_value, int):
+        print(f"[info] worker pid={worker_pid_value}")
+    if isinstance(launch_id_value, str) and launch_id_value:
+        print(f"[info] launch id={launch_id_value}")
+    if isinstance(worker_started_at_value, int):
+        print(f"[info] worker started at={worker_started_at_value}")
+
+    runtime_paths = status_payload.get("runtimePaths")
+    if isinstance(runtime_paths, dict):
+        log_path = runtime_paths.get("logPath") or status_payload.get("logPath")
+        env_path = runtime_paths.get("envPath")
+        socket_path = runtime_paths.get("socketPath")
+        if env_path:
+            print(f"[info] env path={env_path}")
+        if socket_path:
+            print(f"[info] socket path={socket_path}")
+        if log_path:
+            print(f"[info] log path={log_path}")
+
+    for issue in status_payload.get("blockingIssues", []):
+        if isinstance(issue, dict):
+            print(f"[error] {issue.get('message')}")
+    for warning in status_payload.get("warnings", []):
+        print(f"[warn] {warning}")
+
+
+def _rpc_call(method: str, params: Optional[dict[str, object]] = None) -> dict[str, object]:
+    result = call_rpc(method, params=params, environ=os.environ)
+    return result
+
+
+def _cmd_start(_args: argparse.Namespace) -> int:
+    _bootstrap()
+    result = _rpc_call("service.start")
+    output = str(result.get("output") or "").strip()
+    if output:
+        print(output)
+    status_payload = result.get("status")
+    if isinstance(status_payload, dict):
+        _print_service_status(status_payload)
+    return 0 if result.get("started") else 1
+
+
+def _cmd_stop(_args: argparse.Namespace) -> int:
+    _bootstrap()
+    result = _rpc_call("service.stop")
+    output = str(result.get("output") or "").strip()
+    if output:
+        print(output)
+    status_payload = result.get("status")
+    if isinstance(status_payload, dict):
+        _print_service_status(status_payload)
+    return 0 if result.get("stopped", True) else 1
+
+
+def _cmd_restart(_args: argparse.Namespace) -> int:
+    _bootstrap()
+    result = _rpc_call("service.restart")
+    output = str(result.get("output") or "").strip()
+    if output:
+        print(output)
+    status_payload = result.get("status")
+    if isinstance(status_payload, dict):
+        _print_service_status(status_payload)
+    return 0 if result.get("restarted") else 1
+
+
+def _cmd_status(_args: argparse.Namespace) -> int:
+    _bootstrap()
+    status_payload = _rpc_call("service.status")
+    _print_service_status(status_payload)
+    return 0
+
+
+def _cmd_logs(_args: argparse.Namespace) -> int:
+    _bootstrap()
+    try:
+        with SupervisorSubscription("service.subscribe", environ=os.environ) as subscription:
+            initial = subscription.initial_result or {}
+            status_payload = initial.get("status") if isinstance(initial, dict) else None
+            if not isinstance(status_payload, dict):
+                status_payload = _rpc_call("service.status")
+            log_path = Path(str(status_payload.get("logPath") or "")).expanduser()
+            if log_path.is_file():
+                for line in _tail_last_lines(log_path, lines=10):
+                    print(line)
+            for message in subscription.iter_messages():
+                if message.get("type") != "event" or message.get("event") != "log_appended":
+                    continue
+                payload = message.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                for line in payload.get("lines", []):
+                    print(line)
+    except KeyboardInterrupt:
+        return 0
+    return 0
+
+
+def _cmd_supervisor_start(_args: argparse.Namespace) -> int:
+    print("[error] standalone supervisor boot is no longer supported; launch tiya desktop instead")
+    return 1
+
+
+def _cmd_supervisor_status(_args: argparse.Namespace) -> int:
+    _bootstrap()
+    try:
+        _print_service_status(_rpc_call("service.status"))
+        return 0
+    except SupervisorUnavailableError:
+        pid = supervisor_pid(os.environ)
+        if pid is None:
+            print("[info] tiya supervisor 未运行")
+        else:
+            print(f"[warn] tiya supervisor pid 文件存在但 socket 不可用，PID={pid}")
+        return 0
+
+
+def _cmd_supervisor_stop(_args: argparse.Namespace) -> int:
+    _bootstrap()
+    stopped = shutdown_supervisor(environ=os.environ)
+    if stopped:
+        print("[ok] tiya supervisor 已停止")
+    else:
+        print("[info] tiya supervisor 未运行")
+    return 0
+
+
+def _cmd_storage(args: argparse.Namespace) -> int:
+    saved_argv = list(sys.argv)
+    try:
+        sys.argv = ["storage", *args.storage_args]
+        return _run(storage)
+    finally:
+        sys.argv = saved_argv
+
+
+def _ctl_service(args: argparse.Namespace) -> int:
+    _bootstrap(verbose=False)
+    if args.service_command == "subscribe":
+        with SupervisorSubscription("service.subscribe", environ=os.environ) as subscription:
+            _write_json(subscription.initial_result or {})
+            for message in subscription.iter_messages():
+                _write_json(message)
+        return 0
+
+    result = _rpc_call(f"service.{args.service_command}")
+    _write_json(result)
+    return 0
+
+
+def _ctl_config(args: argparse.Namespace) -> int:
+    _bootstrap(verbose=False)
+    if args.config_command == "get":
+        _write_json(_rpc_call("config.get"))
+        return 0
+    if args.config_command == "validate":
+        _write_json(_rpc_call("config.validate", {"payload": _read_json_input()}))
+        return 0
+    if args.config_command == "set":
+        _write_json(_rpc_call("config.set", {"payload": _read_json_input()}))
+        return 0
+    if args.config_command == "set-secret":
+        secret_value = _read_secret_input(args.value)
+        _write_json(_rpc_call("config.setSecret", {"value": secret_value}))
+        return 0
+    _write_json(_rpc_call("config.clearSecret"))
+    return 0
+
+
+def _ctl_sessions(args: argparse.Namespace) -> int:
+    _bootstrap(verbose=False)
+    if args.sessions_command == "list":
+        params: dict[str, object] = {"provider": args.provider, "limit": args.limit}
+        if args.telegram_user_id is not None:
+            params["telegramUserId"] = args.telegram_user_id
+        _write_json(_rpc_call("sessions.list", params))
+        return 0
+    _write_json(
+        _rpc_call(
+            "sessions.history",
+            {
+                "provider": args.provider,
+                "sessionId": args.session_id,
+                "limit": args.limit,
+            },
+        )
+    )
+    return 0
+
+
+def _ctl_diagnostics(args: argparse.Namespace) -> int:
+    _bootstrap(verbose=False)
+    if args.diagnostics_command == "report":
+        _write_json(_rpc_call("diagnostics.report"))
+        return 0
+    params: dict[str, object] = {}
+    if args.destination is not None:
+        params["destinationPath"] = args.destination
+    _write_json(_rpc_call("diagnostics.export", params))
+    return 0
+
+
+def _cmd_diagnostics(args: argparse.Namespace) -> int:
+    _bootstrap()
+    return _ctl_diagnostics(args)
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="tiya")
+    subparsers = parser.add_subparsers(dest="command")
+
+    parser_start = subparsers.add_parser("start")
+    parser_start.set_defaults(func=_cmd_start)
+
+    parser_stop = subparsers.add_parser("stop")
+    parser_stop.set_defaults(func=_cmd_stop)
+
+    parser_restart = subparsers.add_parser("restart")
+    parser_restart.set_defaults(func=_cmd_restart)
+
+    parser_status = subparsers.add_parser("status")
+    parser_status.set_defaults(func=_cmd_status)
+
+    parser_logs = subparsers.add_parser("logs")
+    parser_logs.set_defaults(func=_cmd_logs)
+
+    parser_diagnostics = subparsers.add_parser("diagnostics")
+    diagnostics_subparsers = parser_diagnostics.add_subparsers(dest="diagnostics_command")
+    diagnostics_report = diagnostics_subparsers.add_parser("report")
+    diagnostics_report.set_defaults(func=_cmd_diagnostics)
+    diagnostics_export = diagnostics_subparsers.add_parser("export")
+    diagnostics_export.add_argument("destination", nargs="?")
+    diagnostics_export.set_defaults(func=_cmd_diagnostics)
+
+    parser_storage = subparsers.add_parser("storage")
+    parser_storage.add_argument("storage_args", nargs=argparse.REMAINDER)
+    parser_storage.set_defaults(func=_cmd_storage)
+
+    parser_supervisor = subparsers.add_parser("supervisor", help="internal compatibility commands")
+    supervisor_subparsers = parser_supervisor.add_subparsers(dest="supervisor_command")
+    supervisor_start = supervisor_subparsers.add_parser("start", help="unsupported direct boot; launch desktop instead")
+    supervisor_start.set_defaults(func=_cmd_supervisor_start)
+    supervisor_status = supervisor_subparsers.add_parser("status", help="inspect the attached desktop-owned supervisor")
+    supervisor_status.set_defaults(func=_cmd_supervisor_status)
+    supervisor_stop = supervisor_subparsers.add_parser("stop", help="stop the attached desktop-owned supervisor")
+    supervisor_stop.set_defaults(func=_cmd_supervisor_stop)
+
+    parser_ctl = subparsers.add_parser("ctl")
+    ctl_subparsers = parser_ctl.add_subparsers(dest="ctl_group")
+
+    ctl_service = ctl_subparsers.add_parser("service")
+    ctl_service_subparsers = ctl_service.add_subparsers(dest="service_command")
+    for command_name in ("status", "start", "stop", "restart", "subscribe"):
+        ctl_service_command = ctl_service_subparsers.add_parser(command_name)
+        ctl_service_command.set_defaults(func=_ctl_service)
+
+    ctl_config = ctl_subparsers.add_parser("config")
+    ctl_config_subparsers = ctl_config.add_subparsers(dest="config_command")
+    ctl_config_get = ctl_config_subparsers.add_parser("get")
+    ctl_config_get.set_defaults(func=_ctl_config)
+    ctl_config_validate = ctl_config_subparsers.add_parser("validate")
+    ctl_config_validate.set_defaults(func=_ctl_config)
+    ctl_config_set = ctl_config_subparsers.add_parser("set")
+    ctl_config_set.set_defaults(func=_ctl_config)
+    ctl_config_set_secret = ctl_config_subparsers.add_parser("set-secret")
+    ctl_config_set_secret.add_argument("value", nargs="?")
+    ctl_config_set_secret.set_defaults(func=_ctl_config)
+    ctl_config_clear_secret = ctl_config_subparsers.add_parser("clear-secret")
+    ctl_config_clear_secret.set_defaults(func=_ctl_config)
+
+    ctl_sessions = ctl_subparsers.add_parser("sessions")
+    ctl_sessions_subparsers = ctl_sessions.add_subparsers(dest="sessions_command")
+    ctl_sessions_list = ctl_sessions_subparsers.add_parser("list")
+    ctl_sessions_list.add_argument("--provider", default="codex")
+    ctl_sessions_list.add_argument("--limit", type=int, default=20)
+    ctl_sessions_list.add_argument("--telegram-user-id", type=int)
+    ctl_sessions_list.set_defaults(func=_ctl_sessions)
+    ctl_sessions_history = ctl_sessions_subparsers.add_parser("history")
+    ctl_sessions_history.add_argument("session_id")
+    ctl_sessions_history.add_argument("--provider", default="codex")
+    ctl_sessions_history.add_argument("--limit", type=int, default=20)
+    ctl_sessions_history.set_defaults(func=_ctl_sessions)
+
+    ctl_diagnostics = ctl_subparsers.add_parser("diagnostics")
+    ctl_diagnostics_subparsers = ctl_diagnostics.add_subparsers(dest="diagnostics_command")
+    ctl_diagnostics_report = ctl_diagnostics_subparsers.add_parser("report")
+    ctl_diagnostics_report.set_defaults(func=_ctl_diagnostics)
+    ctl_diagnostics_export = ctl_diagnostics_subparsers.add_parser("export")
+    ctl_diagnostics_export.add_argument("destination", nargs="?")
+    ctl_diagnostics_export.set_defaults(func=_ctl_diagnostics)
+
+    return parser
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if not hasattr(args, "func"):
+        parser.print_help()
+        return 1
+
+    try:
+        return int(args.func(args))
+    except RpcResponseError as exc:
+        if args.command == "ctl":
+            _write_json({"error": {"code": exc.code, "message": exc.message}})
+        else:
+            print(f"[error] {exc.message}")
+        return 1
+    except SupervisorUnavailableError as exc:
+        if args.command == "ctl":
+            _write_json({"error": {"code": "supervisor_unavailable", "message": str(exc)}})
+        else:
+            print(f"[error] {exc}")
+        return 1
+    except (SupervisorClientError, CliError) as exc:
+        if args.command == "ctl":
+            _write_json({"error": {"code": "cli_error", "message": str(exc)}})
+        else:
+            print(f"[error] {exc}")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
