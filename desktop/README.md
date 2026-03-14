@@ -25,7 +25,7 @@ Examples from the repo root:
 - Build macOS preview artifacts with `npm run package:mac` to produce `zip + dmg`.
 - Sidecar binaries are produced into `../dist/desktop-sidecars/` before Electron packaging runs.
 - The same packaging flows are available from the repo root with `uv run desktop package dir|deb|rpm|linux|dmg|mac`.
-- Install the generated Debian package with `sudo apt install ./desktop/release/tiya-0.1.0-linux-amd64.deb`.
+- Install the generated Debian package with `sudo apt install ./desktop/release/tiya-0.1.0-linux-<amd64|arm64>.deb`.
 - Linux secret storage requires `secret-tool`; on Debian/Ubuntu install it with `sudo apt install libsecret-tools`.
 - Linux `zip`/`rpm` artifacts are preview builds and do not guarantee that `secret-tool` is present on the target host.
 
@@ -39,6 +39,6 @@ Examples from the repo root:
 ## CI Release Flow
 
 - GitHub Actions workflow: [`../.github/workflows/desktop-package.yml`](../.github/workflows/desktop-package.yml)
-- `workflow_dispatch` and pull requests run the Linux `deb` smoke package flow.
-- Tags matching `desktop-v*` build preview artifacts on Linux and macOS, then upload workflow artifacts plus `SHA256SUMS.txt`.
+- Pull requests and branch pushes run Linux smoke packaging on both `x64` and `arm64`, producing `zip + deb + rpm`.
+- `workflow_dispatch` and tags matching `desktop-v*` build preview artifacts for Linux `x64/arm64` and macOS `x64/arm64`, then upload workflow artifacts plus `SHA256SUMS.txt`.
 - Automatic GitHub Release publication stays disabled until signing and macOS notarization are implemented.

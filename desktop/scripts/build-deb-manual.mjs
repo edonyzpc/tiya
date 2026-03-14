@@ -1,4 +1,4 @@
-import { chmod, cp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, cp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -11,12 +11,45 @@ if (process.platform !== "linux") {
 
 const desktopRoot = path.resolve(process.cwd());
 const releaseRoot = path.join(desktopRoot, "release");
-const appRoot = path.join(releaseRoot, "linux-unpacked");
 const packageJsonPath = path.join(desktopRoot, "package.json");
 const packageJson = JSON.parse(await readFile(packageJsonPath, "utf8"));
 const version = packageJson.version;
-const outputPath = path.join(releaseRoot, `tiya-${version}-linux-amd64.deb`);
 const stagingRoot = path.join(os.tmpdir(), `tiya-deb-${process.pid}`);
+const ARCHITECTURE_MAP = {
+  x64: {
+    builderArch: "x64",
+    debArch: "amd64"
+  },
+  amd64: {
+    builderArch: "x64",
+    debArch: "amd64"
+  },
+  arm64: {
+    builderArch: "arm64",
+    debArch: "arm64"
+  },
+  aarch64: {
+    builderArch: "arm64",
+    debArch: "arm64"
+  }
+};
+
+function resolveTargetArchitecture() {
+  const requestedArch = (process.env.TIYA_DESKTOP_TARGET_ARCH ?? process.arch).trim();
+  const mapping = ARCHITECTURE_MAP[requestedArch];
+  if (mapping) {
+    return mapping;
+  }
+
+  console.error(
+    `Unsupported Debian packaging architecture: ${requestedArch}. ` +
+      "Set TIYA_DESKTOP_TARGET_ARCH to one of x64, amd64, arm64, or aarch64."
+  );
+  process.exit(1);
+}
+
+const { builderArch, debArch } = resolveTargetArchitecture();
+const outputPath = path.join(releaseRoot, `tiya-${version}-linux-${debArch}.deb`);
 
 async function run(command, args, options = {}) {
   await new Promise((resolve, reject) => {
@@ -35,13 +68,25 @@ async function run(command, args, options = {}) {
   });
 }
 
-async function ensureAppBundle() {
-  try {
-    await readFile(path.join(appRoot, "resources.pak"));
-  } catch {
-    console.error("Expected Electron bundle at release/linux-unpacked. Run the build/package steps first.");
-    process.exit(1);
+async function resolveAppRoot() {
+  const candidates = [
+    path.join(releaseRoot, `linux-${builderArch}-unpacked`),
+    path.join(releaseRoot, "linux-unpacked")
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      await access(path.join(candidate, "resources.pak"));
+      return candidate;
+    } catch {
+      // Try the next possible output directory.
+    }
   }
+
+  console.error(
+    `Expected Electron bundle at ${candidates.join(" or ")}. Run the build/package steps first.`
+  );
+  process.exit(1);
 }
 
 function controlFile() {
@@ -50,7 +95,7 @@ function controlFile() {
     `Version: ${version}`,
     "Section: utility",
     "Priority: optional",
-    "Architecture: amd64",
+    `Architecture: ${debArch}`,
     "Maintainer: tiya contributors",
     "Depends: libgtk-3-0, libnotify4, libnss3, libxss1, libxtst6, xdg-utils, libatspi2.0-0, libuuid1, libsecret-1-0, libsecret-tools",
     "Recommends: libappindicator3-1",
@@ -90,6 +135,7 @@ StartupWMClass=tiya
 }
 
 async function stagePackage() {
+  const appRoot = await resolveAppRoot();
   const pkgRoot = path.join(stagingRoot, "pkg");
   const debianDir = path.join(pkgRoot, "DEBIAN");
   const optDir = path.join(pkgRoot, "opt", "tiya");
@@ -128,7 +174,6 @@ async function stagePackage() {
   return pkgRoot;
 }
 
-await ensureAppBundle();
 const pkgRoot = await stagePackage();
 await rm(outputPath, { force: true });
 await run("dpkg-deb", ["--build", "-Zgzip", "-z1", "--root-owner-group", pkgRoot, outputPath], {

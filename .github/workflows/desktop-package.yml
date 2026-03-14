@@ -25,8 +25,19 @@ on:
 
 jobs:
   smoke:
-    if: github.event_name != 'push' || startsWith(github.ref, 'refs/heads/')
-    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/'))
+    name: Smoke Linux (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    env:
+      TIYA_DESKTOP_TARGET_ARCH: ${{ matrix.arch }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -50,28 +61,44 @@ jobs:
         run: npm run typecheck
       - name: Build smoke package
         working-directory: desktop
-        run: npm run package:deb
+        run: npm run package:linux
       - name: Upload smoke artifact
         uses: actions/upload-artifact@v4
         with:
-          name: desktop-smoke-linux
+          name: desktop-smoke-linux-${{ matrix.arch }}
           path: |
             desktop/release/*.deb
             desktop/release/*.rpm
             desktop/release/*.zip
-            desktop/release/linux-unpacked/**
+            desktop/release/linux*-unpacked/**
+          if-no-files-found: error
 
   release:
-    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/desktop-v')
+    name: Release ${{ matrix.platform }} (${{ matrix.arch }})
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - runner: ubuntu-24.04
+            platform: linux
+            arch: x64
             package_script: package:linux
-          - os: macos-14
+          - runner: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+            package_script: package:linux
+          - runner: macos-15
+            platform: macos
+            arch: arm64
             package_script: package:mac
-    runs-on: ${{ matrix.os }}
+          - runner: macos-15-intel
+            platform: macos
+            arch: x64
+            package_script: package:mac
+    runs-on: ${{ matrix.runner }}
+    env:
+      TIYA_DESKTOP_TARGET_ARCH: ${{ matrix.arch }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -92,18 +119,18 @@ jobs:
         working-directory: desktop
         run: npm run ${{ matrix.package_script }}
       - name: Generate Linux checksums
-        if: runner.os == 'Linux'
+        if: matrix.platform == 'linux'
         shell: bash
         run: sha256sum desktop/release/*.zip desktop/release/*.deb desktop/release/*.rpm > desktop/release/SHA256SUMS.txt
       - name: Generate macOS checksums
-        if: runner.os == 'macOS'
+        if: matrix.platform == 'macos'
         shell: bash
         run: shasum -a 256 desktop/release/*.zip desktop/release/*.dmg > desktop/release/SHA256SUMS.txt
       - name: Upload Linux preview artifacts
-        if: runner.os == 'Linux'
+        if: matrix.platform == 'linux'
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ runner.os }}-desktop-preview
+          name: linux-desktop-preview-${{ matrix.arch }}
           path: |
             desktop/release/*.zip
             desktop/release/*.deb
@@ -111,10 +138,10 @@ jobs:
             desktop/release/SHA256SUMS.txt
           if-no-files-found: error
       - name: Upload macOS preview artifacts
-        if: runner.os == 'macOS'
+        if: matrix.platform == 'macos'
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ runner.os }}-desktop-preview
+          name: macos-desktop-preview-${{ matrix.arch }}
           path: |
             desktop/release/*.zip
             desktop/release/*.dmg
