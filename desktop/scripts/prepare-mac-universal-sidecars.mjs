@@ -78,7 +78,10 @@ async function ensureSidecarTree(rootDir, binaryName) {
 
 async function copySidecarVariant(outputRoot, archKey, sourceRoot, binaryName) {
   const variantDir = path.join(outputRoot, binaryName, ARCHITECTURES[archKey]);
-  await cp(path.join(sourceRoot, binaryName), variantDir, { recursive: true });
+  await cp(path.join(sourceRoot, binaryName), variantDir, {
+    recursive: true,
+    dereference: true
+  });
 }
 
 const options = parseArgs(process.argv.slice(2));

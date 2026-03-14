@@ -43,6 +43,7 @@ rpm:
 mac:
   category: public.app-category.developer-tools
   icon: icon.icns
+  x64ArchFiles: Contents/Resources/tiya-backend/**/*
   target:
     - target: zip
       arch: universal
