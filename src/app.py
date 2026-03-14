@@ -1,5 +1,6 @@
 import os
 import asyncio
+import time
 from importlib import metadata
 
 from aiogram import Bot, Dispatcher
@@ -19,6 +20,7 @@ from .services.storage import StorageConfig, StorageManager
 from .telegram.client import TelegramClient
 from .telegram.rendering import TelegramMessageRenderer
 from .telegram.router import TgCodexService, build_router
+from .worker_state import update_worker_state
 
 
 def _app_version() -> str:
@@ -46,18 +48,24 @@ def _build_config_snapshot(config, paths: RuntimePaths) -> dict[str, object]:
 async def run() -> None:
     config = load_config()
     runtime_paths = RuntimePaths.for_token(config.telegram_token)
+    final_phase = "stopped"
+    final_error: str | None = None
     configure_logging(runtime_paths.log_file)
+    update_worker_state(runtime_paths.worker_state_file, phase="starting", pid=os.getpid())
     instance_lock = BotInstanceLock(config.tg_instance_lock_path, config.telegram_token)
     acquired, lock_owner = instance_lock.acquire()
     if not acquired:
         owner_pid = lock_owner.get("pid")
         owner_started = lock_owner.get("started_at")
         owner_cmdline = lock_owner.get("cmdline", "")
+        final_phase = "crashed"
+        final_error = f"owner_pid={owner_pid} owner_started_at={owner_started} owner_cmdline={owner_cmdline!r}"
         log(
             "[error] instance lock rejected "
             f"(path={instance_lock.path}, owner_pid={owner_pid}, owner_started_at={owner_started}, "
             f"owner_cmdline={owner_cmdline[:220]!r})"
         )
+        update_worker_state(runtime_paths.worker_state_file, phase=final_phase, pid=os.getpid(), error=final_error)
         return
 
     log(
@@ -207,23 +215,39 @@ async def run() -> None:
             log(f"[warn] bot command menu setup failed: {exc}")
 
         log("[info] tiya service ready")
+        update_worker_state(
+            runtime_paths.worker_state_file,
+            phase="running",
+            pid=os.getpid(),
+            ready_at=int(time.time()),
+        )
         service.start_background_refresh()
         await dispatcher.start_polling(bot)
+        final_phase = "stopped"
     finally:
         await service.shutdown()
         await bot.session.close()
         instance_lock.release()
         log(f"[info] instance lock released (path={instance_lock.path})")
+        update_worker_state(
+            runtime_paths.worker_state_file,
+            phase=final_phase,
+            pid=os.getpid(),
+            error=final_error,
+        )
 
 
 def main() -> None:
     token = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+    runtime_paths = RuntimePaths.for_token(token) if token else None
     if token:
         configure_logging(RuntimePaths.for_token(token).log_file)
     else:
         configure_logging()
     try:
         asyncio.run(run())
-    except Exception:
+    except Exception as exc:
+        if runtime_paths is not None:
+            update_worker_state(runtime_paths.worker_state_file, phase="crashed", pid=os.getpid(), error=str(exc))
         get_logger().exception("fatal service error")
         raise

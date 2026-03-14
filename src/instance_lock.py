@@ -90,3 +90,65 @@ class BotInstanceLock:
             os.close(fd)
         except OSError:
             pass
+
+
+class ExclusiveFileLock:
+    def __init__(self, path: Path):
+        self.path = path.expanduser()
+        self._fd: Optional[int] = None
+
+    def acquire(self, payload: Optional[dict[str, Any]] = None) -> tuple[bool, dict[str, Any]]:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            os.close(fd)
+            if exc.errno not in (errno.EACCES, errno.EAGAIN):
+                raise
+            return False, self.read_owner()
+
+        self._fd = fd
+        payload = dict(payload or {})
+        payload.setdefault("pid", os.getpid())
+        payload.setdefault("cmdline", read_process_cmdline(os.getpid()))
+        payload.setdefault("started_at", time.strftime("%Y-%m-%d %H:%M:%S"))
+        payload.setdefault("lock_path", str(self.path))
+        raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, raw)
+        try:
+            os.fsync(fd)
+        except OSError:
+            pass
+        return True, payload
+
+    def read_owner(self) -> dict[str, Any]:
+        try:
+            raw = self.path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return {}
+        if not raw:
+            return {}
+        try:
+            payload = json.loads(raw)
+            if isinstance(payload, dict):
+                return payload
+        except json.JSONDecodeError:
+            pass
+        return {"raw": raw}
+
+    def release(self) -> None:
+        if self._fd is None:
+            return
+        fd = self._fd
+        self._fd = None
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass

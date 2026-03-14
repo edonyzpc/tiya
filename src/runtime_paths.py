@@ -9,6 +9,8 @@ from .instance_lock import token_hash
 
 APP_NAME = "tiya"
 INSTANCE_DIR_NAME = "instances"
+SUPERVISOR_DIR_NAME = "supervisor"
+LEGACY_SUPERVISOR_DIR_NAME = "daemon"
 
 
 def _env_value(environ: Mapping[str, str], key: str) -> Optional[str]:
@@ -48,6 +50,7 @@ class RuntimePaths:
     pid_file: Path
     log_file: Path
     state_file: Path
+    worker_state_file: Path
     lock_base: Path
     attachments_dir: Path
 
@@ -72,9 +75,73 @@ class RuntimePaths:
             pid_file=instance_dir / "bot.pid",
             log_file=instance_dir / "bot.log",
             state_file=instance_dir / "bot_state.json",
+            worker_state_file=instance_dir / "worker_state.json",
             lock_base=instance_dir / "bot.lock",
             attachments_dir=instance_dir / "attachments",
         )
+
+
+@dataclass(frozen=True)
+class SupervisorPaths:
+    root: Path
+    supervisor_dir: Path
+    socket_file: Path
+    pid_file: Path
+    lock_file: Path
+    state_file: Path
+    log_file: Path
+
+
+def _build_supervisor_paths(root: Path, dir_name: str, file_prefix: str) -> SupervisorPaths:
+    supervisor_dir = root / dir_name
+    return SupervisorPaths(
+        root=root,
+        supervisor_dir=supervisor_dir,
+        socket_file=supervisor_dir / "tiya.sock",
+        pid_file=supervisor_dir / f"{file_prefix}.pid",
+        lock_file=supervisor_dir / f"{file_prefix}.lock",
+        state_file=supervisor_dir / f"{file_prefix}_state.json",
+        log_file=supervisor_dir / f"{file_prefix}.log",
+    )
+
+
+def resolve_legacy_supervisor_paths(environ: Optional[Mapping[str, str]] = None) -> SupervisorPaths:
+    env = environ or os.environ
+    root = resolve_runtime_home(env)
+    return _build_supervisor_paths(root, LEGACY_SUPERVISOR_DIR_NAME, "daemon")
+
+
+def _migrate_legacy_supervisor_layout(root: Path) -> None:
+    current = _build_supervisor_paths(root, SUPERVISOR_DIR_NAME, "supervisor")
+    legacy = _build_supervisor_paths(root, LEGACY_SUPERVISOR_DIR_NAME, "daemon")
+
+    if not legacy.supervisor_dir.exists():
+        return
+
+    current.supervisor_dir.mkdir(parents=True, exist_ok=True)
+    path_pairs = (
+        (legacy.socket_file, current.socket_file),
+        (legacy.pid_file, current.pid_file),
+        (legacy.lock_file, current.lock_file),
+        (legacy.state_file, current.state_file),
+        (legacy.log_file, current.log_file),
+    )
+    for old_path, new_path in path_pairs:
+        if not old_path.exists() or new_path.exists():
+            continue
+        old_path.replace(new_path)
+
+    try:
+        legacy.supervisor_dir.rmdir()
+    except OSError:
+        pass
+
+
+def resolve_supervisor_paths(environ: Optional[Mapping[str, str]] = None) -> SupervisorPaths:
+    env = environ or os.environ
+    root = resolve_runtime_home(env)
+    _migrate_legacy_supervisor_layout(root)
+    return _build_supervisor_paths(root, SUPERVISOR_DIR_NAME, "supervisor")
 
 
 def list_runtime_instances(environ: Optional[Mapping[str, str]] = None) -> list[RuntimePaths]:
