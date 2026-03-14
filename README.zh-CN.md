@@ -181,7 +181,7 @@ uv run restart
 
 - `master` 是主分支。所有改动都通过 PR 合入，并经过 review 或 owner 确认。
 - 面向 `master` 的 PR 会触发 `PR Validation`，执行 Python 测试。
-- 每次合并到 `master` 后，桌面打包 workflow 会自动构建 Linux `x64/arm64` 与 macOS `x64/arm64` 的 beta 安装包用于测试。
+- 每次合并到 `master` 后，桌面打包 workflow 会自动构建 Linux `x64/arm64` 与 macOS `universal` 的 beta 安装包用于测试。
 - 稳定版本号通过 `scripts/version_manager.py` 手动维护，它会同步 `pyproject.toml`、`src/__init__.py`、`desktop/package.json` 和 `desktop/package-lock.json`。
 - 推荐的发版准备流程：
   - `uv run python scripts/version_manager.py set 0.2.0`

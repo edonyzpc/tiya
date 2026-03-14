@@ -49,7 +49,7 @@ jobs:
         run: uv sync --group dev
       - name: Install desktop dependencies
         working-directory: desktop
-        run: npm ci
+        run: npm ci --include=optional
       - name: Run Python tests
         run: .venv/bin/python -m pytest
       - name: Typecheck desktop
@@ -88,7 +88,7 @@ jobs:
         run: uv sync --group dev
       - name: Install desktop dependencies
         working-directory: desktop
-        run: npm ci
+        run: npm ci --include=optional
       - name: Build smoke package
         working-directory: desktop
         run: npm run package:linux
@@ -121,11 +121,7 @@ jobs:
             package_script: package:linux
           - runner: macos-15
             platform: macos
-            arch: arm64
-            package_script: package:mac
-          - runner: macos-15-intel
-            platform: macos
-            arch: x64
+            arch: universal
             package_script: package:mac
     runs-on: ${{ matrix.runner }}
     env:
@@ -147,7 +143,7 @@ jobs:
         run: uv sync --group dev
       - name: Install desktop dependencies
         working-directory: desktop
-        run: npm ci
+        run: npm ci --include=optional
       - name: Compute beta desktop version
         id: beta_version
         run: |
@@ -200,11 +196,7 @@ jobs:
             package_script: package:linux
           - runner: macos-15
             platform: macos
-            arch: arm64
-            package_script: package:mac
-          - runner: macos-15-intel
-            platform: macos
-            arch: x64
+            arch: universal
             package_script: package:mac
     runs-on: ${{ matrix.runner }}
     env:
@@ -226,7 +218,7 @@ jobs:
         run: uv sync --group dev
       - name: Install desktop dependencies
         working-directory: desktop
-        run: npm ci
+        run: npm ci --include=optional
       - name: Verify release tag
         id: release_version
         run: |

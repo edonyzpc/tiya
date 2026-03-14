@@ -44,8 +44,9 @@ mac:
   category: public.app-category.developer-tools
   icon: icon.icns
   target:
-    - target: dir
     - target: zip
+      arch: universal
     - target: dmg
+      arch: universal
 dmg:
   sign: false

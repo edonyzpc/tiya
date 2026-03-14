@@ -26,12 +26,22 @@
     "package:deb": "npm run build:icons && npm run prepare:electron && npm run build && npm run build:sidecar && node scripts/run-builder.mjs --dir --publish never && node scripts/build-deb-manual.mjs",
     "package:rpm": "npm run build:icons && npm run prepare:electron && npm run build && npm run build:sidecar && node scripts/run-builder.mjs --linux rpm --publish never",
     "package:linux": "npm run build:icons && npm run prepare:electron && npm run build && npm run build:sidecar && node scripts/run-builder.mjs --linux zip rpm --publish never && node scripts/build-deb-manual.mjs",
-    "package:dmg": "npm run build:icons && npm run prepare:electron && npm run build && npm run build:sidecar && node scripts/run-builder.mjs --mac dmg --publish never",
-    "package:mac": "npm run build:icons && npm run prepare:electron && npm run build && npm run build:sidecar && node scripts/run-builder.mjs --mac zip dmg --publish never"
+    "package:dmg": "node scripts/package-mac.mjs dmg",
+    "package:mac": "node scripts/package-mac.mjs zip dmg"
   },
   "dependencies": {
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
+  },
+  "optionalDependencies": {
+    "@esbuild/darwin-arm64": "0.25.12",
+    "@esbuild/darwin-x64": "0.25.12",
+    "@esbuild/linux-arm64": "0.25.12",
+    "@esbuild/linux-x64": "0.25.12",
+    "@rollup/rollup-darwin-arm64": "4.59.0",
+    "@rollup/rollup-darwin-x64": "4.59.0",
+    "@rollup/rollup-linux-arm64-gnu": "4.59.0",
+    "@rollup/rollup-linux-x64-gnu": "4.59.0"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",

@@ -21,8 +21,8 @@ Examples from the repo root:
 - Build a Linux installable package with `npm run package:deb`.
 - Build a Linux RPM package with `npm run package:rpm`.
 - Build Linux preview artifacts with `npm run package:linux` to produce `zip + deb + rpm`.
-- Build a macOS DMG with `npm run package:dmg`.
-- Build macOS preview artifacts with `npm run package:mac` to produce `zip + dmg`.
+- Build a macOS universal DMG with `npm run package:dmg`.
+- Build macOS universal preview artifacts with `npm run package:mac` to produce `zip + dmg`.
 - Sidecar binaries are produced into `../dist/desktop-sidecars/` before Electron packaging runs.
 - The same packaging flows are available from the repo root with `uv run desktop package dir|deb|rpm|linux|dmg|mac`.
 - Install the generated Debian package with `sudo apt install ./desktop/release/tiya-0.1.2-linux-<amd64|arm64>.deb`.
@@ -40,6 +40,6 @@ Examples from the repo root:
 
 - GitHub Actions workflow: [`../.github/workflows/desktop-package.yml`](../.github/workflows/desktop-package.yml)
 - Pull requests into `master` run Linux smoke packaging on both `x64` and `arm64`, producing `zip + deb + rpm`.
-- Pushes to `master` build beta installables for Linux `x64/arm64` and macOS `x64/arm64`, then upload workflow artifacts plus per-platform `SHA256SUMS`.
+- Pushes to `master` build beta installables for Linux `x64/arm64` and macOS `universal`, then upload workflow artifacts plus per-platform `SHA256SUMS`.
 - Beta builds temporarily rewrite only the desktop package version to `X.Y.Z-beta.<run_number>` so installables are distinguishable during testing.
 - Pushes of tags matching `v*` rebuild the release installables, verify the tag matches the committed stable version and points to `master` HEAD, and publish the resulting assets to GitHub Releases.
