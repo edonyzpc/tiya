@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
 
 
@@ -88,7 +89,10 @@ def test_macos_packaging_uses_universal_targets():
     assert package_json["scripts"]["package:mac"] == "node scripts/package-mac.mjs zip dmg"
     assert "target: zip\n      arch: universal" in builder_config
     assert "target: dmg\n      arch: universal" in builder_config
-    assert "x64ArchFiles: Contents/{Frameworks,MacOS,Resources/tiya-backend}/**/*" in builder_config
+    assert (
+        'x64ArchFiles: "{Contents/{Frameworks,MacOS,Resources/tiya-backend}/**/*,'
+        'Contents/Resources/tiya-backend/**/.dylibs/**/*}"' in builder_config
+    )
     assert "Missing prepared macOS universal sidecar asset" in packaging_script
     assert "macos-x64" in sidecar_bundle_script
     assert "macos-arm64" in sidecar_bundle_script
@@ -107,6 +111,34 @@ def test_macos_packaging_uses_universal_targets():
     assert "uses: astral-sh/setup-uv@v5" in release_universal
     assert "name: Sync Python dependencies" in release_universal
     assert "run: uv sync --group dev" in release_universal
+
+
+def test_macos_x64_arch_allowlist_matches_hidden_sidecar_dylibs():
+    repo_root = Path(__file__).resolve().parent.parent
+    builder_config = (repo_root / "desktop" / "electron-builder.yml").read_text(encoding="utf-8")
+    pattern_prefix = 'x64ArchFiles: "'
+    pattern = builder_config.split(pattern_prefix, maxsplit=1)[1].split('"', maxsplit=1)[0]
+    sample_paths = [
+        "Contents/Frameworks/Electron Framework.framework/Versions/A/Electron Framework",
+        "Contents/MacOS/tiya",
+        "Contents/Resources/tiya-backend/tiya-worker/macos-arm64/_internal/PIL/.dylibs/libXau.6.dylib",
+    ]
+    script = f"""
+const minimatch = require('./desktop/node_modules/minimatch');
+const pattern = {pattern!r};
+const samplePaths = {sample_paths!r};
+for (const samplePath of samplePaths) {{
+  if (!minimatch(samplePath, pattern, {{ matchBase: true }})) {{
+    console.error(`pattern did not match: ${{samplePath}}`);
+    process.exit(1);
+  }}
+}}
+"""
+    subprocess.run(
+        ["node", "-e", script],
+        cwd=repo_root,
+        check=True,
+    )
 
 
 def _load_sidecar_builder():

@@ -43,7 +43,9 @@ rpm:
 mac:
   category: public.app-category.developer-tools
   icon: icon.icns
-  x64ArchFiles: Contents/{Frameworks,MacOS,Resources/tiya-backend}/**/*
+  # @electron/universal uses minimatch without dot=true, so hidden directories
+  # like the PyInstaller PIL/.dylibs tree must be allowed explicitly.
+  x64ArchFiles: "{Contents/{Frameworks,MacOS,Resources/tiya-backend}/**/*,Contents/Resources/tiya-backend/**/.dylibs/**/*}"
   target:
     - target: zip
       arch: universal
