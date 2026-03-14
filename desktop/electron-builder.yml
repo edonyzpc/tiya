@@ -1,0 +1,51 @@
+appId: io.tiya.desktop
+productName: tiya
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+directories:
+  buildResources: assets
+  output: release
+electronDist: node_modules/electron/dist
+files:
+  - dist-renderer/**
+  - dist-electron/**
+  - package.json
+extraResources:
+  - from: ../dist/desktop-sidecars/tiya-supervisor
+    to: tiya-backend/tiya-supervisor
+  - from: ../dist/desktop-sidecars/tiya-worker
+    to: tiya-backend/tiya-worker
+asar: true
+linux:
+  category: Utility
+  description: Desktop GUI for configuring and managing the tiya runtime.
+  executableName: tiya-desktop
+  icon: icons
+  desktop:
+    Name: tiya
+    StartupWMClass: tiya
+  target:
+    - target: dir
+    - target: zip
+    - target: deb
+    - target: rpm
+deb:
+  compression: gz
+  packageCategory: utility
+  maintainer: tiya contributors
+  synopsis: tiya desktop control console
+rpm:
+  compression: null
+  packageCategory: Applications/Utilities
+  maintainer: tiya contributors
+  fpm:
+    - --rpm-compression
+    - gzip
+mac:
+  category: public.app-category.developer-tools
+  icon: icon.icns
+  target:
+    - target: dir
+    - target: zip
+    - target: dmg
+dmg:
+  sign: false

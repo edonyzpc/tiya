@@ -14,6 +14,9 @@ dependencies = [
 ]
 
 [project.scripts]
+tiya = "src.cli:main"
+tiya-supervisor = "src.supervisor:main"
+desktop = "src.desktop_cli:main"
 start = "src.cli:entry_start"
 stop = "src.cli:entry_stop"
 restart = "src.cli:entry_restart"
@@ -23,6 +26,7 @@ storage = "src.cli:entry_storage"
 
 [dependency-groups]
 dev = [
+  "pyinstaller>=6.13.0",
   "pytest>=8.4.0",
   "pytest-asyncio>=1.2.0",
 ]
