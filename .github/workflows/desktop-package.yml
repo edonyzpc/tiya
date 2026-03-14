@@ -1,0 +1,122 @@
+name: Desktop Package
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "desktop/**"
+      - "packaging/**"
+      - "src/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/desktop-package.yml"
+  push:
+    branches:
+      - main
+    tags:
+      - "desktop-v*"
+    paths:
+      - "desktop/**"
+      - "packaging/**"
+      - "src/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/desktop-package.yml"
+
+jobs:
+  smoke:
+    if: github.event_name != 'push' || startsWith(github.ref, 'refs/heads/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: desktop/package-lock.json
+      - name: Sync Python dependencies
+        run: uv sync --group dev
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm ci
+      - name: Run Python tests
+        run: .venv/bin/python -m pytest
+      - name: Typecheck desktop
+        working-directory: desktop
+        run: npm run typecheck
+      - name: Build smoke package
+        working-directory: desktop
+        run: npm run package:deb
+      - name: Upload smoke artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-smoke-linux
+          path: |
+            desktop/release/*.deb
+            desktop/release/*.rpm
+            desktop/release/*.zip
+            desktop/release/linux-unpacked/**
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            package_script: package:linux
+          - os: macos-14
+            package_script: package:mac
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: desktop/package-lock.json
+      - name: Sync Python dependencies
+        run: uv sync --group dev
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm ci
+      - name: Build desktop release
+        working-directory: desktop
+        run: npm run ${{ matrix.package_script }}
+      - name: Generate Linux checksums
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sha256sum desktop/release/*.zip desktop/release/*.deb desktop/release/*.rpm > desktop/release/SHA256SUMS.txt
+      - name: Generate macOS checksums
+        if: runner.os == 'macOS'
+        shell: bash
+        run: shasum -a 256 desktop/release/*.zip desktop/release/*.dmg > desktop/release/SHA256SUMS.txt
+      - name: Upload Linux preview artifacts
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ runner.os }}-desktop-preview
+          path: |
+            desktop/release/*.zip
+            desktop/release/*.deb
+            desktop/release/*.rpm
+            desktop/release/SHA256SUMS.txt
+          if-no-files-found: error
+      - name: Upload macOS preview artifacts
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ runner.os }}-desktop-preview
+          path: |
+            desktop/release/*.zip
+            desktop/release/*.dmg
+            desktop/release/SHA256SUMS.txt
+          if-no-files-found: error
