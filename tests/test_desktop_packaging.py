@@ -88,7 +88,7 @@ def test_macos_packaging_uses_universal_targets():
     assert package_json["scripts"]["package:mac"] == "node scripts/package-mac.mjs zip dmg"
     assert "target: zip\n      arch: universal" in builder_config
     assert "target: dmg\n      arch: universal" in builder_config
-    assert "x64ArchFiles: Contents/Resources/tiya-backend/**/*" in builder_config
+    assert "x64ArchFiles: Contents/{Frameworks,MacOS,Resources/tiya-backend}/**/*" in builder_config
     assert "Missing prepared macOS universal sidecar asset" in packaging_script
     assert "macos-x64" in sidecar_bundle_script
     assert "macos-arm64" in sidecar_bundle_script
