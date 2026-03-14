@@ -31,6 +31,7 @@ permissions:
 
 jobs:
   preflight:
+    name: Preflight
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -57,6 +58,7 @@ jobs:
         run: npm run typecheck
 
   smoke-linux-x64:
+    name: Smoke Linux (x64)
     if: github.event_name == 'pull_request'
     needs: preflight
     runs-on: ubuntu-24.04
@@ -95,6 +97,7 @@ jobs:
           if-no-files-found: error
 
   smoke-linux-arm64-prep:
+    name: Smoke Linux (arm64 prep)
     if: github.event_name == 'pull_request'
     needs: preflight
     runs-on: ubuntu-24.04-arm
@@ -135,6 +138,7 @@ jobs:
           if-no-files-found: error
 
   smoke-linux-arm64-rpm:
+    name: Smoke Linux (arm64 rpm)
     if: github.event_name == 'pull_request'
     needs: smoke-linux-arm64-prep
     runs-on: ubuntu-24.04
@@ -174,6 +178,7 @@ jobs:
           if-no-files-found: error
 
   beta-metadata:
+    name: Beta Metadata
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     needs: preflight
     runs-on: ubuntu-24.04
@@ -191,6 +196,7 @@ jobs:
           echo "value=$version" >> "$GITHUB_OUTPUT"
 
   beta-linux-x64:
+    name: Beta Linux (x64)
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     needs:
       - beta-metadata
@@ -235,6 +241,7 @@ jobs:
           if-no-files-found: error
 
   beta-linux-arm64-prep:
+    name: Beta Linux (arm64 prep)
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     needs:
       - beta-metadata
@@ -276,6 +283,7 @@ jobs:
           if-no-files-found: error
 
   beta-linux-arm64-rpm:
+    name: Beta Linux (arm64)
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     needs:
       - beta-metadata
@@ -326,6 +334,7 @@ jobs:
           if-no-files-found: error
 
   beta-macos-sidecars-x64:
+    name: Beta macOS Sidecars (x64)
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     needs: beta-metadata
     runs-on: macos-15-intel
@@ -358,6 +367,7 @@ jobs:
           if-no-files-found: error
 
   beta-macos-sidecars-arm64:
+    name: Beta macOS Sidecars (arm64)
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     needs: beta-metadata
     runs-on: macos-15
@@ -390,6 +400,7 @@ jobs:
           if-no-files-found: error
 
   beta-macos-universal:
+    name: Beta macOS (universal)
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     needs:
       - beta-metadata
@@ -453,6 +464,7 @@ jobs:
           if-no-files-found: error
 
   release-metadata:
+    name: Release Metadata
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: preflight
     runs-on: ubuntu-24.04
@@ -482,6 +494,7 @@ jobs:
           fi
 
   release-linux-x64:
+    name: Release Build Linux (x64)
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: release-metadata
     runs-on: ubuntu-24.04
@@ -523,6 +536,7 @@ jobs:
           if-no-files-found: error
 
   release-linux-arm64-prep:
+    name: Release Build Linux (arm64 prep)
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: release-metadata
     runs-on: ubuntu-24.04-arm
@@ -561,6 +575,7 @@ jobs:
           if-no-files-found: error
 
   release-linux-arm64-rpm:
+    name: Release Build Linux (arm64)
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs:
       - release-metadata
@@ -606,6 +621,7 @@ jobs:
           if-no-files-found: error
 
   release-macos-sidecars-x64:
+    name: Release Build macOS Sidecars (x64)
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: release-metadata
     runs-on: macos-15-intel
@@ -638,6 +654,7 @@ jobs:
           if-no-files-found: error
 
   release-macos-sidecars-arm64:
+    name: Release Build macOS Sidecars (arm64)
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: release-metadata
     runs-on: macos-15
@@ -670,6 +687,7 @@ jobs:
           if-no-files-found: error
 
   release-macos-universal:
+    name: Release Build macOS (universal)
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs:
       - release-metadata
@@ -728,6 +746,7 @@ jobs:
           if-no-files-found: error
 
   publish-release:
+    name: Publish Release
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs:
       - release-linux-x64
