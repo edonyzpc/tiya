@@ -76,6 +76,13 @@ def parse_default_provider(raw: Optional[str]) -> AgentProvider:
     return cast(AgentProvider, value)
 
 
+def parse_desktop_gpu_mode(raw: Optional[str]) -> str:
+    value = (raw or "disabled").strip().lower()
+    if value not in ("disabled", "enabled"):
+        raise ValueError("TIYA_DESKTOP_GPU_MODE must be enabled or disabled")
+    return value
+
+
 def parse_non_negative_int(raw: Optional[str], default: int) -> int:
     if raw is None:
         return default
