@@ -82,6 +82,7 @@ def test_macos_packaging_uses_universal_targets():
     sidecar_bundle_script = (
         repo_root / "desktop" / "scripts" / "prepare-mac-universal-sidecars.mjs"
     ).read_text(encoding="utf-8")
+    workflow = (repo_root / ".github" / "workflows" / "desktop-package.yml").read_text(encoding="utf-8")
 
     assert package_json["scripts"]["package:dmg"] == "node scripts/package-mac.mjs dmg"
     assert package_json["scripts"]["package:mac"] == "node scripts/package-mac.mjs zip dmg"
@@ -91,6 +92,19 @@ def test_macos_packaging_uses_universal_targets():
     assert "macos-x64" in sidecar_bundle_script
     assert "macos-arm64" in sidecar_bundle_script
     assert 'case "$(uname -m)"' in sidecar_bundle_script
+    beta_universal = workflow.split("  beta-macos-universal:\n", maxsplit=1)[1].split(
+        "  release-metadata:\n", maxsplit=1
+    )[0]
+    release_universal = workflow.split("  release-macos-universal:\n", maxsplit=1)[1].split(
+        "  publish-release:\n", maxsplit=1
+    )[0]
+    assert "uses: astral-sh/setup-uv@v5" in beta_universal
+    assert "name: Sync Python dependencies" in beta_universal
+    assert "run: uv sync --group dev" in beta_universal
+    assert "uses: actions/setup-python@v5" in release_universal
+    assert "uses: astral-sh/setup-uv@v5" in release_universal
+    assert "name: Sync Python dependencies" in release_universal
+    assert "run: uv sync --group dev" in release_universal
 
 
 def _load_sidecar_builder():

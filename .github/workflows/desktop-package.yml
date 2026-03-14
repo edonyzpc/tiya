@@ -414,11 +414,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: "npm"
           cache-dependency-path: desktop/package-lock.json
+      - name: Sync Python dependencies
+        run: uv sync --group dev
       - name: Install desktop dependencies
         working-directory: desktop
         run: npm ci --include=optional
@@ -698,11 +701,17 @@ jobs:
       TIYA_DESKTOP_TARGET_ARCH: universal
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: "npm"
           cache-dependency-path: desktop/package-lock.json
+      - name: Sync Python dependencies
+        run: uv sync --group dev
       - name: Install desktop dependencies
         working-directory: desktop
         run: npm ci --include=optional
