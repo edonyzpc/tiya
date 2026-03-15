@@ -286,137 +286,171 @@ function resolveStoredTheme(): ThemeKey {
   return themeSamples.some((sample) => sample.key === stored) ? (stored as ThemeKey) : "stone-moss";
 }
 
-export default function App() {
-  const [view, setView] = useState<ViewKey>("overview");
-  const [diagnosticsTab, setDiagnosticsTab] = useState<DiagnosticsTab>("logs");
-  const [activeTheme, setActiveTheme] = useState<ThemeKey>(() => resolveStoredTheme());
+function waitForNextPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => {
+      resolve();
+    });
+  });
+}
+
+function useDesktopRuntime(setNotice: Dispatch<SetStateAction<Notice | null>>) {
   const [bootstrap, setBootstrap] = useState<DesktopBootstrap | null>(null);
+  const [initState, setInitState] = useState<DesktopBootstrap["initState"]>({
+    supervisorReady: false,
+    subscriptionReady: false,
+    diagnosticsReady: false,
+    initError: null
+  });
   const [status, setStatus] = useState<ServiceStatus | null>(null);
   const [config, setConfig] = useState<ConfigSnapshot | null>(null);
-  const [diagnostics, setDiagnostics] = useState<DoctorReport | null>(null);
   const [draftEnv, setDraftEnv] = useState<Record<string, string>>({});
   const [tokenDraft, setTokenDraft] = useState("");
   const [validation, setValidation] = useState<ValidationResult | null>(null);
-  const [notice, setNotice] = useState<Notice | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
-  const [sessionProvider, setSessionProvider] = useState("codex");
-  const [sessionUserIdInput, setSessionUserIdInput] = useState("");
-  const [sessionList, setSessionList] = useState<SessionListResult | null>(null);
-  const [sessionHistory, setSessionHistory] = useState<SessionHistoryResult | null>(null);
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
-  const [logLines, setLogLines] = useState<string[]>([]);
-  const [wizardStepIndex, setWizardStepIndex] = useState(0);
-  const [lastExportPath, setLastExportPath] = useState<string | null>(null);
   const [fatalError, setFatalError] = useState<string | null>(null);
+  const lastInitErrorRef = useRef<string | null>(null);
 
-  const deferredLogs = useDeferredValue(logLines);
-  const requiresSetup = Boolean(config?.secrets && (!config.secrets.telegramToken.present || status?.phase === "unconfigured"));
-  const showWizard = requiresSetup;
-  const currentView = navItems.find((item) => item.key === view) ?? navItems[0];
-  const activeThemeSample = themeSamples.find((sample) => sample.key === activeTheme) ?? themeSamples[2];
-
-  useEffect(() => {
-    document.documentElement.dataset.theme = activeTheme;
-    window.localStorage.setItem(themeStorageKey, activeTheme);
-  }, [activeTheme]);
-
-  async function hydrate(): Promise<void> {
-    setBusyAction("hydrate");
-    setFatalError(null);
-    try {
-      const nextBootstrap = await window.tiyaDesktop.desktop.bootstrap();
-      startTransition(() => {
-        setBootstrap(nextBootstrap);
+  function applyBootstrap(nextBootstrap: DesktopBootstrap): void {
+    startTransition(() => {
+      setBootstrap(nextBootstrap);
+      setInitState(nextBootstrap.initState);
+      if (nextBootstrap.status) {
         setStatus(nextBootstrap.status);
+      }
+      if (nextBootstrap.config) {
         setConfig(nextBootstrap.config);
-        setDiagnostics(nextBootstrap.diagnostics);
         setDraftEnv({ ...nextBootstrap.config.env });
-        setValidation(null);
+      }
+      setFatalError(null);
+    });
+  }
+
+  async function loadRuntimeData(params: { suppressNotice?: boolean; resetDraft?: boolean } = {}): Promise<void> {
+    const { suppressNotice = false, resetDraft = false } = params;
+    try {
+      const [nextStatus, nextConfig] = await Promise.all([
+        window.tiyaDesktop.service.status(),
+        window.tiyaDesktop.config.get()
+      ]);
+      startTransition(() => {
+        setStatus(nextStatus);
+        setConfig(nextConfig);
+        setDraftEnv((current) => (resetDraft || Object.keys(current).length === 0 ? { ...nextConfig.env } : current));
+        setInitState((current) => ({
+          ...current,
+          supervisorReady: true,
+          initError: null
+        }));
+        setFatalError(null);
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setFatalError(message);
-      setNotice({
-        tone: "danger",
-        text: `Desktop bootstrap failed: ${message}`
-      });
+      if (!suppressNotice) {
+        setNotice({
+          tone: "danger",
+          text: message
+        });
+      }
+    }
+  }
+
+  async function hydrate(): Promise<void> {
+    setBusyAction("hydrate");
+    try {
+      const nextBootstrap = await window.tiyaDesktop.desktop.bootstrap();
+      applyBootstrap(nextBootstrap);
+      await loadRuntimeData({ resetDraft: true });
     } finally {
       setBusyAction((current) => (current === "hydrate" ? null : current));
     }
   }
 
   useEffect(() => {
-    void hydrate();
-
-    const unsubscribe = window.tiyaDesktop.events.subscribe((event: DesktopEvent) => {
-      if (event.name === "log_appended" && event.payload && typeof event.payload === "object" && "lines" in event.payload) {
-        const lines = (event.payload as { lines?: unknown }).lines;
-        if (Array.isArray(lines)) {
-          setLogLines((previous) => mergeLines(previous, lines.map((item) => String(item))));
+    let cancelled = false;
+    void (async () => {
+      try {
+        const nextBootstrap = await window.tiyaDesktop.desktop.bootstrap();
+        if (cancelled) {
+          return;
         }
+        applyBootstrap(nextBootstrap);
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        setFatalError(message);
+        setNotice({
+          tone: "danger",
+          text: `Desktop bootstrap failed: ${message}`
+        });
         return;
       }
-
-      if (
-        ["service_phase_changed", "health_updated", "worker_started", "worker_stopped", "worker_crashed"].includes(event.name) &&
-        event.payload &&
-        typeof event.payload === "object" &&
-        "phase" in event.payload
-      ) {
-        setStatus(event.payload as ServiceStatus);
-        return;
+      if (!cancelled) {
+        void loadRuntimeData({ suppressNotice: true, resetDraft: true });
       }
-
-      if (event.name === "config_changed") {
-        void (async () => {
-          try {
-            const [nextConfig, nextDiagnostics, nextStatus] = await Promise.all([
-              window.tiyaDesktop.config.get(),
-              window.tiyaDesktop.diagnostics.report(),
-              window.tiyaDesktop.service.status()
-            ]);
-            startTransition(() => {
-              setConfig(nextConfig);
-              setDraftEnv({ ...nextConfig.env });
-              setDiagnostics(nextDiagnostics);
-              setStatus(nextStatus);
-            });
-          } catch {
-            // Ignore transient reload failures; the next explicit refresh will recover.
-          }
-        })();
-      }
-    });
-
+    })();
     return () => {
-      unsubscribe();
+      cancelled = true;
     };
   }, []);
 
   useEffect(() => {
-    if (view !== "sessions") {
+    if (!initState.initError || initState.initError === lastInitErrorRef.current) {
       return;
     }
-    void loadSessions();
-  }, [view, sessionProvider]);
+    lastInitErrorRef.current = initState.initError;
+    setNotice({
+      tone: "danger",
+      text: `Desktop initialization failed: ${initState.initError}`
+    });
+  }, [initState.initError, setNotice]);
 
-  useEffect(() => {
-    if (!showWizard) {
+  function handleEvent(event: DesktopEvent): void {
+    if (
+      ["service_phase_changed", "health_updated", "worker_started", "worker_stopped", "worker_crashed"].includes(event.name) &&
+      event.payload &&
+      typeof event.payload === "object" &&
+      "phase" in event.payload
+    ) {
+      startTransition(() => {
+        setStatus(event.payload as ServiceStatus);
+        setInitState((current) => ({
+          ...current,
+          supervisorReady: true,
+          initError: null
+        }));
+      });
       return;
     }
-    setView("overview");
-  }, [showWizard]);
 
-  async function refreshStatusAndDiagnostics(): Promise<{ nextStatus: ServiceStatus; nextDiagnostics: DoctorReport }> {
-    const [nextStatus, nextDiagnostics] = await Promise.all([
-      window.tiyaDesktop.service.status(),
-      window.tiyaDesktop.diagnostics.report()
-    ]);
-    return { nextStatus, nextDiagnostics };
+    if (event.name === "desktop_init_changed" && event.payload && typeof event.payload === "object") {
+      const nextInitState = event.payload as DesktopBootstrap["initState"];
+      setInitState(nextInitState);
+      setBootstrap((current) => (current ? { ...current, initState: nextInitState } : current));
+      return;
+    }
+
+    if (event.name === "supervisor_connected") {
+      setInitState((current) => ({
+        ...current,
+        supervisorReady: true,
+        subscriptionReady: true,
+        initError: null
+      }));
+      return;
+    }
+
+    if (event.name === "config_changed") {
+      void loadRuntimeData({ suppressNotice: true, resetDraft: true });
+    }
   }
 
-  async function runServiceAction(action: ServiceAction): Promise<void> {
+  async function runServiceAction(action: ServiceAction): Promise<ServiceActionResult | null> {
     setBusyAction(action);
+    await waitForNextPaint();
     try {
       const result: ServiceActionResult =
         action === "start"
@@ -425,31 +459,25 @@ export default function App() {
             ? await window.tiyaDesktop.service.stop()
             : await window.tiyaDesktop.service.restart();
       setStatus(result.status);
-      if (result.output.trim()) {
-        setLogLines((previous) => mergeLines(previous, result.output.trim().split("\n")));
-      }
-      const { nextStatus, nextDiagnostics } = await refreshStatusAndDiagnostics();
-      startTransition(() => {
-        setStatus(nextStatus);
-        setDiagnostics(nextDiagnostics);
-      });
-      const succeeded = didServiceActionSucceed(action, result);
       setNotice({
-        tone: succeeded ? "success" : "danger",
-        text: succeeded ? `Service ${action} completed.` : describeServiceActionFailure(action, { ...result, status: nextStatus })
+        tone: didServiceActionSucceed(action, result) ? "success" : "danger",
+        text: didServiceActionSucceed(action, result) ? `Service ${action} completed.` : describeServiceActionFailure(action, result)
       });
-      setView("overview");
+      return result;
     } catch (error) {
       setNotice({
         tone: "danger",
         text: error instanceof Error ? error.message : String(error)
       });
+      return null;
     } finally {
       setBusyAction((current) => (current === action ? null : current));
     }
   }
 
   async function validateDraft(): Promise<ValidationResult | null> {
+    setBusyAction("validate");
+    await waitForNextPaint();
     try {
       const payload = buildPayload(draftEnv, config);
       const result = await window.tiyaDesktop.config.validate(payload);
@@ -461,18 +489,21 @@ export default function App() {
         text: error instanceof Error ? error.message : String(error)
       });
       return null;
+    } finally {
+      setBusyAction((current) => (current === "validate" ? null : current));
     }
   }
 
-  async function saveDraft(origin: "wizard" | "config"): Promise<void> {
+  async function saveDraft(origin: "wizard" | "config"): Promise<boolean> {
     setBusyAction(`save-${origin}`);
+    await waitForNextPaint();
     try {
       if (!config) {
         setNotice({
           tone: "danger",
           text: "Configuration snapshot is not loaded yet."
         });
-        return;
+        return false;
       }
 
       const secretBackendGuidance = resolveSecretBackendGuidance(config.secrets.telegramToken);
@@ -481,16 +512,17 @@ export default function App() {
           tone: "danger",
           text: secretBackendGuidance
         });
-        return;
+        return false;
       }
 
-      const result = await validateDraft();
-      if (!result || !result.ok) {
+      const result = await window.tiyaDesktop.config.validate(buildPayload(draftEnv, config));
+      setValidation(result);
+      if (!result.ok) {
         setNotice({
           tone: "warning",
           text: "Validation failed. Resolve blocking items before saving."
         });
-        return;
+        return false;
       }
 
       if (tokenDraft.trim()) {
@@ -498,29 +530,26 @@ export default function App() {
         setTokenDraft("");
       }
 
-      const savedConfig = await window.tiyaDesktop.config.set(buildPayload(result.normalized.env, config));
-      const [nextStatus, nextDiagnostics] = await Promise.all([
-        window.tiyaDesktop.service.status(),
-        window.tiyaDesktop.diagnostics.report()
+      const [savedConfig, nextStatus] = await Promise.all([
+        window.tiyaDesktop.config.set(buildPayload(result.normalized.env, config)),
+        window.tiyaDesktop.service.status()
       ]);
       startTransition(() => {
         setConfig(savedConfig);
         setDraftEnv({ ...savedConfig.env });
         setStatus(nextStatus);
-        setDiagnostics(nextDiagnostics);
       });
       setNotice({
         tone: "success",
         text: origin === "wizard" ? "Initial setup saved." : "Configuration saved."
       });
-      if (origin === "wizard") {
-        setView("overview");
-      }
+      return true;
     } catch (error) {
       setNotice({
         tone: "danger",
         text: error instanceof Error ? error.message : String(error)
       });
+      return false;
     } finally {
       setBusyAction((current) => (current === `save-${origin}` ? null : current));
     }
@@ -528,14 +557,18 @@ export default function App() {
 
   async function clearSecret(): Promise<void> {
     setBusyAction("clear-secret");
+    await waitForNextPaint();
     try {
       await window.tiyaDesktop.config.clearSecret();
       const [nextConfig, nextStatus] = await Promise.all([
         window.tiyaDesktop.config.get(),
         window.tiyaDesktop.service.status()
       ]);
-      setConfig(nextConfig);
-      setStatus(nextStatus);
+      startTransition(() => {
+        setConfig(nextConfig);
+        setDraftEnv({ ...nextConfig.env });
+        setStatus(nextStatus);
+      });
       setNotice({
         tone: "warning",
         text: "Telegram token secret cleared."
@@ -550,8 +583,38 @@ export default function App() {
     }
   }
 
-  async function loadSessions(focusSessionId?: string): Promise<void> {
+  return {
+    bootstrap,
+    initState,
+    status,
+    config,
+    draftEnv,
+    tokenDraft,
+    validation,
+    busyAction,
+    fatalError,
+    setDraftEnv,
+    setTokenDraft,
+    hydrate,
+    handleEvent,
+    runServiceAction,
+    validateDraft,
+    saveDraft,
+    clearSecret
+  };
+}
+
+function useSessionsView(setNotice: Dispatch<SetStateAction<Notice | null>>) {
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [sessionProvider, setSessionProvider] = useState("codex");
+  const [sessionUserIdInput, setSessionUserIdInput] = useState("");
+  const [sessionList, setSessionList] = useState<SessionListResult | null>(null);
+  const [sessionHistory, setSessionHistory] = useState<SessionHistoryResult | null>(null);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+
+  async function loadSessions(): Promise<void> {
     setBusyAction("sessions");
+    await waitForNextPaint();
     try {
       const telegramUserId = parseOptionalUserId(sessionUserIdInput);
       const listing = await window.tiyaDesktop.sessions.list({
@@ -559,19 +622,15 @@ export default function App() {
         limit: 24,
         telegramUserId
       });
-      const preferred = focusSessionId ?? listing.items[0]?.sessionId ?? null;
-      let history: SessionHistoryResult | null = null;
-      if (preferred) {
-        history = await window.tiyaDesktop.sessions.history({
-          provider: sessionProvider,
-          sessionId: preferred,
-          limit: 80
-        });
-      }
       startTransition(() => {
         setSessionList(listing);
-        setSelectedSessionId(preferred);
-        setSessionHistory(history);
+        setSelectedSessionId((current) => (current && listing.items.some((item) => item.sessionId === current) ? current : null));
+        setSessionHistory((current) => {
+          if (!current?.meta) {
+            return null;
+          }
+          return listing.items.some((item) => item.sessionId === current.meta?.sessionId) ? current : null;
+        });
       });
     } catch (error) {
       setNotice({
@@ -583,8 +642,12 @@ export default function App() {
     }
   }
 
-  async function selectSession(session: SessionSummary): Promise<void> {
-    setBusyAction("history");
+  async function selectSession(session: SessionSummary, params: { silent?: boolean } = {}): Promise<void> {
+    const { silent = false } = params;
+    if (!silent) {
+      setBusyAction("history");
+      await waitForNextPaint();
+    }
     try {
       const history = await window.tiyaDesktop.sessions.history({
         provider: session.provider,
@@ -601,8 +664,337 @@ export default function App() {
         text: error instanceof Error ? error.message : String(error)
       });
     } finally {
-      setBusyAction((current) => (current === "history" ? null : current));
+      if (!silent) {
+        setBusyAction((current) => (current === "history" ? null : current));
+      }
     }
+  }
+
+  useEffect(() => {
+    if (!sessionList?.items.length) {
+      return;
+    }
+    const targetSession =
+      sessionList.items.find((item) => item.sessionId === selectedSessionId) ??
+      (selectedSessionId ? null : sessionList.items[0] ?? null);
+    if (!targetSession) {
+      return;
+    }
+    if (sessionHistory?.meta?.sessionId === targetSession.sessionId) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void selectSession(targetSession, { silent: true });
+    }, 250);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [sessionHistory?.meta?.sessionId, sessionList, selectedSessionId]);
+
+  return {
+    busyAction,
+    sessionProvider,
+    sessionUserIdInput,
+    sessionList,
+    sessionHistory,
+    selectedSessionId,
+    setSessionProvider,
+    setSessionUserIdInput,
+    loadSessions,
+    selectSession
+  };
+}
+
+function useDiagnosticsView(
+  setNotice: Dispatch<SetStateAction<Notice | null>>,
+  params: {
+    bootstrapDiagnostics: DoctorReport | null;
+    diagnosticsActive: boolean;
+    logsActive: boolean;
+  }
+) {
+  const { bootstrapDiagnostics, diagnosticsActive, logsActive } = params;
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [diagnostics, setDiagnostics] = useState<DoctorReport | null>(bootstrapDiagnostics);
+  const [lastExportPath, setLastExportPath] = useState<string | null>(null);
+  const [logLines, setLogLines] = useState<string[]>([]);
+  const [hasLoaded, setHasLoaded] = useState(Boolean(bootstrapDiagnostics));
+  const bufferedLogsRef = useRef<string[]>([]);
+
+  useEffect(() => {
+    if (!bootstrapDiagnostics) {
+      return;
+    }
+    setDiagnostics(bootstrapDiagnostics);
+    setHasLoaded(true);
+  }, [bootstrapDiagnostics]);
+
+  useEffect(() => {
+    if (!logsActive) {
+      return;
+    }
+    setLogLines(bufferedLogsRef.current);
+  }, [logsActive]);
+
+  async function loadDiagnostics(params: { force?: boolean; busyKey?: string | null } = {}): Promise<DoctorReport | null> {
+    const { force = false, busyKey = null } = params;
+    if (!force && hasLoaded && diagnostics) {
+      return diagnostics;
+    }
+    if (busyKey) {
+      setBusyAction(busyKey);
+      await waitForNextPaint();
+    }
+    try {
+      const nextDiagnostics = await window.tiyaDesktop.diagnostics.report();
+      startTransition(() => {
+        setDiagnostics(nextDiagnostics);
+        setHasLoaded(true);
+      });
+      return nextDiagnostics;
+    } catch (error) {
+      setNotice({
+        tone: "danger",
+        text: error instanceof Error ? error.message : String(error)
+      });
+      return null;
+    } finally {
+      if (busyKey) {
+        setBusyAction((current) => (current === busyKey ? null : current));
+      }
+    }
+  }
+
+  useEffect(() => {
+    if (diagnosticsActive) {
+      void loadDiagnostics();
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void loadDiagnostics();
+    }, 2000);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [diagnosticsActive]);
+
+  function handleEvent(event: DesktopEvent): void {
+    if (!(event.name === "log_appended" && event.payload && typeof event.payload === "object" && "lines" in event.payload)) {
+      return;
+    }
+    const lines = (event.payload as { lines?: unknown }).lines;
+    if (!Array.isArray(lines)) {
+      return;
+    }
+    const merged = mergeLines(bufferedLogsRef.current, lines.map((item) => String(item)));
+    bufferedLogsRef.current = merged;
+    if (logsActive) {
+      setLogLines(merged);
+    }
+  }
+
+  function appendOutput(lines: string[]): void {
+    if (!lines.length) {
+      return;
+    }
+    const merged = mergeLines(bufferedLogsRef.current, lines);
+    bufferedLogsRef.current = merged;
+    if (logsActive) {
+      setLogLines(merged);
+    }
+  }
+
+  function invalidate(): void {
+    setHasLoaded(false);
+  }
+
+  function scheduleRefresh(): void {
+    window.setTimeout(() => {
+      void loadDiagnostics({ force: true });
+    }, 0);
+  }
+
+  async function exportDiagnostics(): Promise<void> {
+    setBusyAction("export");
+    await waitForNextPaint();
+    try {
+      const result = await window.tiyaDesktop.diagnostics.export();
+      setLastExportPath(result.path);
+      setNotice({
+        tone: "success",
+        text: `Diagnostics exported to ${result.path}`
+      });
+    } catch (error) {
+      setNotice({
+        tone: "danger",
+        text: error instanceof Error ? error.message : String(error)
+      });
+    } finally {
+      setBusyAction((current) => (current === "export" ? null : current));
+    }
+  }
+
+  return {
+    busyAction,
+    diagnostics,
+    logLines,
+    lastExportPath,
+    hasLoaded,
+    loadDiagnostics,
+    handleEvent,
+    appendOutput,
+    invalidate,
+    scheduleRefresh,
+    exportDiagnostics
+  };
+}
+
+export default function App() {
+  const [view, setView] = useState<ViewKey>("overview");
+  const [diagnosticsTab, setDiagnosticsTab] = useState<DiagnosticsTab>("logs");
+  const [activeTheme, setActiveTheme] = useState<ThemeKey>(() => resolveStoredTheme());
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const [wizardStepIndex, setWizardStepIndex] = useState(0);
+  const logsActive = view === "logs" && diagnosticsTab === "logs";
+  const diagnosticsActive = view === "logs" && diagnosticsTab === "diagnostics";
+  const runtime = useDesktopRuntime(setNotice);
+  const sessions = useSessionsView(setNotice);
+  const diagnosticsView = useDiagnosticsView(setNotice, {
+    bootstrapDiagnostics: runtime.bootstrap?.diagnostics ?? null,
+    diagnosticsActive,
+    logsActive
+  });
+  const eventHandlerRef = useRef<(event: DesktopEvent) => void>(() => undefined);
+
+  const {
+    bootstrap,
+    initState,
+    status,
+    config,
+    draftEnv,
+    tokenDraft,
+    validation,
+    busyAction: runtimeBusyAction,
+    fatalError,
+    setDraftEnv,
+    setTokenDraft,
+    hydrate,
+    handleEvent: handleRuntimeEvent,
+    runServiceAction: runRuntimeServiceAction,
+    validateDraft,
+    saveDraft: saveRuntimeDraft,
+    clearSecret
+  } = runtime;
+  const {
+    busyAction: sessionsBusyAction,
+    sessionProvider,
+    sessionUserIdInput,
+    sessionList,
+    sessionHistory,
+    selectedSessionId,
+    setSessionProvider,
+    setSessionUserIdInput,
+    loadSessions,
+    selectSession
+  } = sessions;
+  const {
+    busyAction: diagnosticsBusyAction,
+    diagnostics,
+    logLines,
+    lastExportPath,
+    hasLoaded: diagnosticsLoaded,
+    loadDiagnostics,
+    handleEvent: handleDiagnosticsEvent,
+    appendOutput,
+    invalidate: invalidateDiagnostics,
+    scheduleRefresh: scheduleDiagnosticsRefresh,
+    exportDiagnostics
+  } = diagnosticsView;
+
+  const busyAction = runtimeBusyAction ?? sessionsBusyAction ?? diagnosticsBusyAction;
+  const deferredLogs = useDeferredValue(logLines);
+  const requiresSetup = Boolean(config?.secrets && (!config.secrets.telegramToken.present || status?.phase === "unconfigured"));
+  const showWizard = requiresSetup;
+  const currentView = navItems.find((item) => item.key === view) ?? navItems[0];
+  const activeThemeSample = themeSamples.find((sample) => sample.key === activeTheme) ?? themeSamples[2];
+  const reducedEffects = (config?.env.TIYA_DESKTOP_GPU_MODE ?? bootstrap?.config?.env.TIYA_DESKTOP_GPU_MODE ?? "disabled") !== "enabled";
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = activeTheme;
+    window.localStorage.setItem(themeStorageKey, activeTheme);
+  }, [activeTheme]);
+
+  useEffect(() => {
+    eventHandlerRef.current = (event: DesktopEvent) => {
+      handleRuntimeEvent(event);
+      if (event.name === "config_changed") {
+        invalidateDiagnostics();
+      }
+      handleDiagnosticsEvent(event);
+    };
+  }, [handleDiagnosticsEvent, handleRuntimeEvent, invalidateDiagnostics]);
+
+  useEffect(() => {
+    const unsubscribe = window.tiyaDesktop.events.subscribe((event) => {
+      eventHandlerRef.current(event);
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (view !== "sessions") {
+      return;
+    }
+    void loadSessions();
+  }, [sessionProvider, view]);
+
+  useEffect(() => {
+    if (!showWizard) {
+      return;
+    }
+    setView("overview");
+  }, [showWizard]);
+
+  async function runServiceAction(action: ServiceAction): Promise<void> {
+    const result = await runRuntimeServiceAction(action);
+    if (!result) {
+      return;
+    }
+    if (result.output.trim()) {
+      appendOutput(result.output.trim().split("\n"));
+    }
+    if (diagnosticsLoaded) {
+      scheduleDiagnosticsRefresh();
+    }
+    setView("overview");
+  }
+
+  async function saveDraft(origin: "wizard" | "config"): Promise<void> {
+    const saved = await saveRuntimeDraft(origin);
+    if (!saved) {
+      return;
+    }
+    invalidateDiagnostics();
+    if (diagnosticsLoaded) {
+      scheduleDiagnosticsRefresh();
+    }
+    if (origin === "wizard") {
+      setView("overview");
+    }
+  }
+
+  async function handleClearSecret(): Promise<void> {
+    await clearSecret();
+    invalidateDiagnostics();
+    if (diagnosticsLoaded) {
+      scheduleDiagnosticsRefresh();
+    }
+  }
+
+  async function refreshDiagnostics(): Promise<void> {
+    await loadDiagnostics({ force: true, busyKey: "diagnostics" });
   }
 
   async function pickDirectory(fieldKey: string): Promise<void> {
@@ -626,28 +1018,18 @@ export default function App() {
     }
   }
 
-  async function exportDiagnostics(): Promise<void> {
-    setBusyAction("export");
-    try {
-      const result = await window.tiyaDesktop.diagnostics.export();
-      setLastExportPath(result.path);
-      setNotice({
-        tone: "success",
-        text: `Diagnostics exported to ${result.path}`
-      });
-    } catch (error) {
-      setNotice({
-        tone: "danger",
-        text: error instanceof Error ? error.message : String(error)
-      });
-    } finally {
-      setBusyAction((current) => (current === "export" ? null : current));
-    }
-  }
-
   function renderOverview(): JSX.Element {
     if (!status) {
-      return <EmptyState title="Awaiting supervisor status" copy="The desktop-owned control plane has not returned a service snapshot yet." />;
+      return (
+        <EmptyState
+          title="Awaiting supervisor status"
+          copy={
+            initState.initError
+              ? `Desktop is still initializing: ${initState.initError}`
+              : "The desktop-owned control plane has not returned a service snapshot yet."
+          }
+        />
+      );
     }
 
     const runtime = status.runtimePaths;
@@ -798,7 +1180,7 @@ export default function App() {
               />
               <ActionButton
                 label="Clear Secret"
-                onClick={() => void clearSecret()}
+                onClick={() => void handleClearSecret()}
                 busy={busyAction === "clear-secret"}
                 subtle
                 disabled={Boolean(secretBackendGuidance)}
@@ -947,7 +1329,7 @@ export default function App() {
                 onOpen={openPath}
               />
               <div className="button-row">
-                <ActionButton label="Refresh Diagnostics" onClick={() => void hydrate()} busy={busyAction === "hydrate"} subtle />
+                <ActionButton label="Refresh Diagnostics" onClick={() => void refreshDiagnostics()} busy={busyAction === "diagnostics"} subtle />
                 <ActionButton label="Export Bundle" onClick={() => void exportDiagnostics()} busy={busyAction === "export"} />
               </div>
               {lastExportPath ? <p className="field-hint">Last export: {lastExportPath}</p> : null}
@@ -1253,7 +1635,7 @@ export default function App() {
   }
 
   return (
-    <div className={`app-shell ${showWizard ? "app-shell-setup-lock" : ""}`}>
+    <div className={`app-shell ${showWizard ? "app-shell-setup-lock" : ""} ${reducedEffects ? "app-shell-reduced-effects" : ""}`}>
       <div className="ambient ambient-a" />
       <div className="ambient ambient-b" />
 
@@ -1271,7 +1653,7 @@ export default function App() {
           <p>
             {showWizard
               ? "Finish the guided setup before using the rest of the desktop console."
-              : status?.blockingIssues[0]?.message ?? "Desktop-managed runtime, supervisor, and diagnostics."}
+              : status?.blockingIssues[0]?.message ?? initState.initError ?? "Desktop-managed runtime, supervisor, and diagnostics."}
           </p>
         </div>
 

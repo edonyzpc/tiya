@@ -7,6 +7,7 @@ import {
   type ConfigSnapshot,
   type DesktopBootstrap,
   type DesktopEvent,
+  type DesktopInitState,
   type DoctorReport,
   type ServiceStatus,
   type SessionHistoryResult,
@@ -31,9 +32,19 @@ class DesktopController {
   private windows = new Set<BrowserWindow>();
   private subscription: RpcSubscription | null = null;
   private subscriptionPromise: Promise<void> | null = null;
+  private backgroundInitializationPromise: Promise<void> | null = null;
   private supervisorReadyPromise: Promise<void> | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private supervisorProcess: ChildProcess | null = null;
+  private status: ServiceStatus | null = null;
+  private config: ConfigSnapshot | null = null;
+  private diagnostics: DoctorReport | null = null;
+  private initState: DesktopInitState = {
+    supervisorReady: false,
+    subscriptionReady: false,
+    diagnosticsReady: false,
+    initError: null
+  };
   readonly paths = resolveDesktopPaths();
 
   registerWindow(window: BrowserWindow): void {
@@ -43,9 +54,25 @@ class DesktopController {
     });
   }
 
-  async initialize(): Promise<void> {
-    await this.ensureSupervisorReady();
-    await this.ensureSubscription();
+  startBackgroundInitialization(): void {
+    if (this.backgroundInitializationPromise) {
+      return;
+    }
+    this.backgroundInitializationPromise = (async () => {
+      try {
+        await this.ensureSupervisorReady();
+        await Promise.allSettled([this.refreshStatus(), this.refreshConfig()]);
+        await this.ensureSubscription();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.updateInitState({
+          initError: message
+        });
+        this.scheduleReconnect();
+      }
+    })().finally(() => {
+      this.backgroundInitializationPromise = null;
+    });
   }
 
   private async ensureSupervisorReady(): Promise<void> {
@@ -53,6 +80,18 @@ class DesktopController {
       this.supervisorReadyPromise = ensureSupervisor(this.paths, this.supervisorProcess)
         .then((child) => {
           this.supervisorProcess = child;
+          this.updateInitState({
+            supervisorReady: true,
+            initError: null
+          });
+        })
+        .catch((error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          this.updateInitState({
+            supervisorReady: false,
+            initError: message
+          });
+          throw error;
         })
         .finally(() => {
           this.supervisorReadyPromise = null;
@@ -69,6 +108,21 @@ class DesktopController {
     }
   }
 
+  private updateInitState(next: Partial<DesktopInitState>): void {
+    const updated: DesktopInitState = {
+      ...this.initState,
+      ...next
+    };
+    if (JSON.stringify(updated) === JSON.stringify(this.initState)) {
+      return;
+    }
+    this.initState = updated;
+    this.broadcast({
+      name: "desktop_init_changed",
+      payload: updated
+    });
+  }
+
   private async ensureSubscription(): Promise<void> {
     if (this.subscription) {
       return;
@@ -82,21 +136,40 @@ class DesktopController {
         });
         subscription.on("close", () => {
           this.subscription = null;
+          this.updateInitState({
+            subscriptionReady: false
+          });
           this.scheduleReconnect();
         });
-        subscription.on("error", () => {
+        subscription.on("error", (error) => {
           this.subscription = null;
+          this.updateInitState({
+            subscriptionReady: false,
+            initError: error instanceof Error ? error.message : String(error)
+          });
           this.scheduleReconnect();
         });
         await subscription.connect("service.subscribe", {}, this.paths.socketPath);
         this.subscription = subscription;
+        this.updateInitState({
+          supervisorReady: true,
+          subscriptionReady: true,
+          initError: null
+        });
         this.broadcast({
           name: "supervisor_connected",
           payload: {
             socketPath: this.paths.socketPath
           }
         });
-      })().finally(() => {
+      })().catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        this.updateInitState({
+          subscriptionReady: false,
+          initError: message
+        });
+        throw error;
+      }).finally(() => {
         this.subscriptionPromise = null;
       });
     }
@@ -119,24 +192,60 @@ class DesktopController {
 
   async invoke<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
     await this.ensureSupervisorReady();
-    if (method !== "service.subscribe") {
-      await this.ensureSubscription();
-    }
     return (await callRpc(method, params, this.paths.socketPath)) as T;
   }
 
-  async bootstrap(): Promise<DesktopBootstrap> {
-    const [status, config, diagnostics] = await Promise.all([
-      this.invoke<ServiceStatus>("service.status"),
-      this.invoke<ConfigSnapshot>("config.get"),
-      this.invoke<DoctorReport>("diagnostics.report")
-    ]);
+  async refreshStatus(): Promise<ServiceStatus> {
+    const status = await this.invoke<ServiceStatus>("service.status");
+    this.status = status;
+    this.updateInitState({
+      supervisorReady: true,
+      initError: null
+    });
+    return status;
+  }
 
+  async refreshConfig(): Promise<ConfigSnapshot> {
+    const config = await this.invoke<ConfigSnapshot>("config.get");
+    this.config = config;
+    return config;
+  }
+
+  async refreshDiagnostics(): Promise<DoctorReport> {
+    const diagnostics = await this.invoke<DoctorReport>("diagnostics.report");
+    this.diagnostics = diagnostics;
+    this.updateInitState({
+      diagnosticsReady: true
+    });
+    return diagnostics;
+  }
+
+  updateStatus(status: ServiceStatus): void {
+    this.status = status;
+    this.updateInitState({
+      supervisorReady: true,
+      initError: null
+    });
+  }
+
+  updateConfig(config: ConfigSnapshot): void {
+    this.config = config;
+  }
+
+  clearDiagnostics(): void {
+    this.diagnostics = null;
+    this.updateInitState({
+      diagnosticsReady: false
+    });
+  }
+
+  async bootstrap(): Promise<DesktopBootstrap> {
     return {
       paths: this.paths,
-      status,
-      config,
-      diagnostics
+      status: this.status,
+      config: this.config,
+      diagnostics: this.diagnostics,
+      initState: this.initState
     };
   }
 
@@ -147,6 +256,9 @@ class DesktopController {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    this.updateInitState({
+      subscriptionReady: false
+    });
   }
 
   async shutdown(): Promise<void> {
@@ -208,16 +320,13 @@ wireSingleInstanceLifecycle({
 });
 
 app.whenReady().then(async () => {
-  try {
-    await controller.initialize();
-  } catch (error) {
-    console.error("Failed to initialize desktop controller:", error);
-  }
   createWindow();
+  controller.startBackgroundInitialization();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
+      controller.startBackgroundInitialization();
     }
   });
 });
@@ -246,26 +355,38 @@ ipcMain.handle(IPC_CHANNELS.invoke, async (_event, request: { method: string; pa
     case "desktop.bootstrap":
       return controller.bootstrap();
     case "service.status":
+      return controller.refreshStatus();
     case "service.start":
     case "service.stop":
-    case "service.restart":
-      return controller.invoke<ServiceStatus | { status: ServiceStatus; output: string; started?: boolean; stopped?: boolean; restarted?: boolean }>(request.method, params);
+    case "service.restart": {
+      const result = await controller.invoke<ServiceStatus | { status: ServiceStatus; output: string; started?: boolean; stopped?: boolean; restarted?: boolean }>(request.method, params);
+      if (result && typeof result === "object" && "status" in result) {
+        controller.updateStatus(result.status as ServiceStatus);
+      }
+      return result;
+    }
     case "config.get":
-      return controller.invoke<ConfigSnapshot>("config.get");
+      return controller.refreshConfig();
     case "config.validate":
       return controller.invoke<ValidationResult>("config.validate", params);
-    case "config.set":
-      return controller.invoke<ConfigSnapshot>("config.set", params);
+    case "config.set": {
+      const config = await controller.invoke<ConfigSnapshot>("config.set", params);
+      controller.updateConfig(config);
+      controller.clearDiagnostics();
+      return config;
+    }
     case "config.setSecret":
+      controller.clearDiagnostics();
       return controller.invoke("config.setSecret", params);
     case "config.clearSecret":
+      controller.clearDiagnostics();
       return controller.invoke("config.clearSecret", params);
     case "sessions.list":
       return controller.invoke<SessionListResult>("sessions.list", params);
     case "sessions.history":
       return controller.invoke<SessionHistoryResult>("sessions.history", params);
     case "diagnostics.report":
-      return controller.invoke<DoctorReport>("diagnostics.report");
+      return controller.refreshDiagnostics();
     case "diagnostics.export":
       return controller.invoke("diagnostics.export", params);
     case "dialog.pickDirectory": {

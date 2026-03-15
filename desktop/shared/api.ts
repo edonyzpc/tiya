@@ -173,14 +173,23 @@ export interface DesktopPaths {
   socketPath: string;
 }
 
+export interface DesktopInitState {
+  supervisorReady: boolean;
+  subscriptionReady: boolean;
+  diagnosticsReady: boolean;
+  initError: string | null;
+}
+
 export interface DesktopBootstrap {
   paths: DesktopPaths;
-  status: ServiceStatus;
-  config: ConfigSnapshot;
-  diagnostics: DoctorReport;
+  status: ServiceStatus | null;
+  config: ConfigSnapshot | null;
+  diagnostics: DoctorReport | null;
+  initState: DesktopInitState;
 }
 
 export type DesktopEventName =
+  | "desktop_init_changed"
   | "service_phase_changed"
   | "supervisor_connected"
   | "worker_started"

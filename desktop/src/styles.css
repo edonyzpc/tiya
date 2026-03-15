@@ -138,6 +138,12 @@ pre {
   user-select: none;
 }
 
+.app-shell-reduced-effects.app-shell-setup-lock .sidebar,
+.app-shell-reduced-effects.app-shell-setup-lock .workspace {
+  filter: none;
+  opacity: 0.34;
+}
+
 .app-shell::before {
   content: "";
   position: absolute;
@@ -151,12 +157,20 @@ pre {
   mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.7), transparent);
 }
 
+.app-shell-reduced-effects::before {
+  display: none;
+}
+
 .ambient {
   position: absolute;
   inset: auto;
   border-radius: 999px;
   filter: blur(90px);
   pointer-events: none;
+}
+
+.app-shell-reduced-effects .ambient {
+  display: none;
 }
 
 .ambient-a {
@@ -189,6 +203,10 @@ pre {
     linear-gradient(180deg, rgba(255, 255, 255, 0.2), transparent 48%),
     var(--sidebar-bg);
   backdrop-filter: blur(20px);
+}
+
+.app-shell-reduced-effects .sidebar {
+  backdrop-filter: none;
 }
 
 .workspace {
@@ -247,6 +265,16 @@ pre {
   background: var(--panel);
   box-shadow: var(--shadow);
   backdrop-filter: blur(18px);
+}
+
+.app-shell-reduced-effects .status-card,
+.app-shell-reduced-effects .card,
+.app-shell-reduced-effects .notice,
+.app-shell-reduced-effects .theme-switcher-popover,
+.app-shell-reduced-effects .setup-modal,
+.app-shell-reduced-effects .theme-preview-card {
+  box-shadow: none;
+  backdrop-filter: none;
 }
 
 .status-card {
