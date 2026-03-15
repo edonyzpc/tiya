@@ -16,7 +16,7 @@ from .provider_defaults import (
     resolve_claude_bin as resolve_claude_bin_default,
     resolve_codex_bin as resolve_codex_bin_default,
 )
-from .runtime_paths import RuntimePaths
+from .runtime_paths import RuntimePaths, default_working_dir, ensure_directory
 
 
 def env(name: str, default: Optional[str] = None) -> Optional[str]:
@@ -178,6 +178,7 @@ def load_config() -> AppConfig:
     if not token:
         raise RuntimeError("missing TELEGRAM_BOT_TOKEN")
     runtime_paths = RuntimePaths.for_token(token)
+    default_cwd = ensure_directory(Path(env("DEFAULT_CWD", str(default_working_dir()))).expanduser())
 
     return AppConfig(
         telegram_token=token,
@@ -189,7 +190,7 @@ def load_config() -> AppConfig:
         stream_edit_interval_ms=parse_non_negative_int(env("TG_STREAM_EDIT_INTERVAL_MS", "700"), 700),
         stream_min_delta_chars=parse_non_negative_int(env("TG_STREAM_MIN_DELTA_CHARS", "8"), 8),
         thinking_status_interval_ms=parse_non_negative_int(env("TG_THINKING_STATUS_INTERVAL_MS", "900"), 900),
-        default_cwd=Path(env("DEFAULT_CWD", os.getcwd())).expanduser(),
+        default_cwd=default_cwd,
         storage_path=Path(env("STORAGE_PATH", str(runtime_paths.db_file))).expanduser(),
         legacy_state_path=Path(env("STATE_PATH", str(runtime_paths.state_file))).expanduser(),
         codex_session_root=Path(env("CODEX_SESSION_ROOT", str(default_codex_session_root()))).expanduser(),

@@ -28,6 +28,7 @@ from .provider_defaults import (
     resolve_claude_bin,
     resolve_codex_bin,
 )
+from .runtime_paths import default_working_dir, ensure_directory
 from .secret_store import SecretStatus
 
 
@@ -97,7 +98,7 @@ def default_env_values() -> dict[str, str]:
     return {
         "ALLOWED_TELEGRAM_USER_IDS": "",
         "ALLOWED_CWD_ROOTS": "",
-        "DEFAULT_CWD": str(REPO_ROOT),
+        "DEFAULT_CWD": str(default_working_dir()),
         "DEFAULT_PROVIDER": "codex",
         "TIYA_DESKTOP_GPU_MODE": "disabled",
         "TG_PROXY_URL": "",
@@ -195,8 +196,14 @@ def validate_snapshot(payload: object, *, secret_present: bool) -> dict[str, obj
             except ValueError as exc:
                 errors.append(str(exc))
 
-    default_cwd = Path(_env_value(env_values, "DEFAULT_CWD") or str(REPO_ROOT)).expanduser()
-    if not default_cwd.exists() or not default_cwd.is_dir():
+    default_cwd = Path(_env_value(env_values, "DEFAULT_CWD") or str(default_working_dir())).expanduser()
+    default_cwd_ready = True
+    try:
+        ensure_directory(default_cwd)
+    except OSError as exc:
+        default_cwd_ready = False
+        errors.append(f"DEFAULT_CWD could not be created: {default_cwd} ({exc})")
+    if default_cwd_ready and default_cwd.exists() and not default_cwd.is_dir():
         errors.append(f"DEFAULT_CWD does not exist or is not a directory: {default_cwd}")
 
     allowed_roots = _env_value(env_values, "ALLOWED_CWD_ROOTS")
@@ -277,6 +284,7 @@ def validate_snapshot(payload: object, *, secret_present: bool) -> dict[str, obj
 
 def persist_snapshot(*, paths: ConfigPaths, payload: object) -> dict[str, object]:
     env_values = normalize_snapshot(payload)
+    ensure_directory(Path(_env_value(env_values, "DEFAULT_CWD") or str(default_working_dir())).expanduser())
     write_env_file(paths.env_file, env_values, key_order=SUPPORTED_ENV_KEYS)
     return {"env": env_values}
 

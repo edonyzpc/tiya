@@ -12,6 +12,7 @@ import {
   childIsAlive,
   ensureOwnedSupervisor,
   migrateLegacySupervisorRuntime,
+  resolveDesktopRuntimeRoot,
   shutdownOwnedSupervisor,
   waitForChildExit,
 } from "./supervisor_runtime_core";
@@ -84,7 +85,10 @@ async function waitForStatus(
 
 export function resolveDesktopPaths(): DesktopPaths {
   const userData = app.getPath("userData");
-  const runtimeRoot = path.join(userData, "runtime");
+  const runtimeRoot = resolveDesktopRuntimeRoot({
+    configuredHome: process.env.TIYA_HOME,
+    homeDir: app.getPath("home"),
+  });
   const layout = buildSupervisorRuntimeLayout(runtimeRoot);
   const backendRoot = app.isPackaged
     ? path.join(process.resourcesPath, "tiya-backend")

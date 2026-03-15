@@ -1,14 +1,18 @@
 from pathlib import Path
 
-from src.runtime_paths import APP_NAME, RuntimePaths, default_runtime_home, resolve_runtime_home
+from src.runtime_paths import APP_NAME, RuntimePaths, default_runtime_home, default_working_dir, resolve_runtime_home
 
 
-def test_default_runtime_home_uses_macos_convention():
-    assert default_runtime_home("Darwin") == Path("~/Library/Application Support").expanduser() / APP_NAME
+def test_default_runtime_home_uses_home_hidden_dir_on_macos():
+    assert default_runtime_home("Darwin") == Path(f"~/.{APP_NAME}").expanduser()
 
 
-def test_default_runtime_home_uses_linux_state_dir():
-    assert default_runtime_home("Linux") == Path("~/.local/state").expanduser() / APP_NAME
+def test_default_runtime_home_uses_home_hidden_dir_on_linux():
+    assert default_runtime_home("Linux") == Path(f"~/.{APP_NAME}").expanduser()
+
+
+def test_default_working_dir_uses_home_hidden_dir():
+    assert default_working_dir() == Path(f"~/.{APP_NAME}").expanduser()
 
 
 def test_resolve_runtime_home_prefers_xdg_over_platform_default():

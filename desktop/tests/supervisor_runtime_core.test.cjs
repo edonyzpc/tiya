@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const {
   buildSupervisorLaunchSpec,
+  resolveDesktopRuntimeRoot,
   buildSupervisorRuntimeLayout,
   childIsAlive,
   ensureOwnedSupervisor,
@@ -17,6 +18,23 @@ test("buildSupervisorRuntimeLayout uses supervisor paths and keeps legacy daemon
   assert.equal(layout.socketPath, "/tmp/tiya-runtime/supervisor/tiya.sock");
   assert.equal(layout.legacySupervisorDir, "/tmp/tiya-runtime/daemon");
   assert.equal(layout.legacySocketPath, "/tmp/tiya-runtime/daemon/tiya.sock");
+});
+
+test("resolveDesktopRuntimeRoot defaults to ~/.tiya", () => {
+  const runtimeRoot = resolveDesktopRuntimeRoot({
+    homeDir: "/Users/demo",
+  });
+
+  assert.equal(runtimeRoot, "/Users/demo/.tiya");
+});
+
+test("resolveDesktopRuntimeRoot expands explicit TIYA_HOME", () => {
+  const runtimeRoot = resolveDesktopRuntimeRoot({
+    configuredHome: "~/custom-tiya",
+    homeDir: "/Users/demo",
+  });
+
+  assert.equal(runtimeRoot, "/Users/demo/custom-tiya");
 });
 
 test("migrateLegacySupervisorRuntime renames the legacy daemon directory when needed", async () => {

@@ -61,6 +61,23 @@ def test_validate_snapshot_rejects_invalid_desktop_gpu_mode(monkeypatch, tmp_pat
     assert "TIYA_DESKTOP_GPU_MODE must be enabled or disabled" in result["errors"]
 
 
+def test_validate_snapshot_creates_missing_default_cwd(monkeypatch, tmp_path: Path):
+    default_cwd = tmp_path / ".tiya"
+    payload = {
+        "env": {
+            **managed_config.default_env_values(),
+            "DEFAULT_CWD": str(default_cwd),
+        }
+    }
+
+    monkeypatch.setattr(managed_config, "_is_runner_available", lambda _name: True)
+
+    result = managed_config.validate_snapshot(payload, secret_present=True)
+
+    assert result["ok"] is True
+    assert default_cwd.is_dir()
+
+
 def test_build_worker_env_clears_inherited_lowercase_proxy_when_config_is_blank(tmp_path: Path):
     token = "123456:abcdefghijklmnopqrstuvwxyz12345"
     runtime_paths = RuntimePaths.for_token(token, {"TIYA_HOME": str(tmp_path)})

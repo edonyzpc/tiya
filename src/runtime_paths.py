@@ -1,13 +1,13 @@
 import os
 from dataclasses import dataclass
 from pathlib import Path
-import platform
 from typing import Mapping, Optional
 
 from .instance_lock import token_hash
 
 
 APP_NAME = "tiya"
+DEFAULT_HOME_DIR_NAME = f".{APP_NAME}"
 INSTANCE_DIR_NAME = "instances"
 SUPERVISOR_DIR_NAME = "supervisor"
 LEGACY_SUPERVISOR_DIR_NAME = "daemon"
@@ -21,11 +21,23 @@ def _env_value(environ: Mapping[str, str], key: str) -> Optional[str]:
     return value or None
 
 
+def default_home_dir() -> Path:
+    return Path(f"~/{DEFAULT_HOME_DIR_NAME}").expanduser()
+
+
 def default_runtime_home(system_name: Optional[str] = None) -> Path:
-    current_system = system_name or platform.system()
-    if current_system == "Darwin":
-        return Path("~/Library/Application Support").expanduser() / APP_NAME
-    return Path("~/.local/state").expanduser() / APP_NAME
+    _ = system_name
+    return default_home_dir()
+
+
+def default_working_dir() -> Path:
+    return default_home_dir()
+
+
+def ensure_directory(path: Path) -> Path:
+    resolved = path.expanduser()
+    resolved.mkdir(parents=True, exist_ok=True)
+    return resolved
 
 
 def resolve_runtime_home(environ: Mapping[str, str]) -> Path:

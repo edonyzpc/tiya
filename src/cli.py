@@ -32,7 +32,7 @@ from .provider_defaults import (
     resolve_claude_bin,
     resolve_codex_bin,
 )
-from .runtime_paths import RuntimePaths, list_runtime_instances, resolve_runtime_home
+from .runtime_paths import RuntimePaths, default_working_dir, list_runtime_instances, resolve_runtime_home
 from .services.storage import StorageConfig, StorageManager
 from .services.storage.schema import SCHEMA_VERSION
 from .worker_state import read_state
@@ -307,7 +307,7 @@ def _build_child_env(paths: RuntimePaths) -> dict[str, str]:
             "TELEGRAM_BOT_TOKEN": _env_or_default("TELEGRAM_BOT_TOKEN", ""),
             "ALLOWED_TELEGRAM_USER_IDS": _env_or_default("ALLOWED_TELEGRAM_USER_IDS", ""),
             "ALLOWED_CWD_ROOTS": _env_or_default("ALLOWED_CWD_ROOTS", ""),
-            "DEFAULT_CWD": _env_or_default("DEFAULT_CWD", str(REPO_ROOT)),
+            "DEFAULT_CWD": _env_or_default("DEFAULT_CWD", str(default_working_dir())),
             "DEFAULT_PROVIDER": _env_or_default("DEFAULT_PROVIDER", "codex"),
             "CODEX_BIN": resolved_codex_bin,
             "CODEX_SESSION_ROOT": _env_or_default("CODEX_SESSION_ROOT", str(default_codex_session_root())),

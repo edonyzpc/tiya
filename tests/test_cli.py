@@ -9,7 +9,7 @@ from src import cli
 from src.config import load_config
 from src.instance_lock import BotInstanceLock
 from src.process_utils import ProcessSnapshot
-from src.runtime_paths import RuntimePaths
+from src.runtime_paths import RuntimePaths, default_working_dir
 from src.services.storage import StorageConfig, StorageManager
 from src.supervisor_client import SupervisorUnavailableError
 
@@ -174,6 +174,17 @@ def test_build_child_env_matches_config_runner_resolution(monkeypatch, tmp_path:
     assert child_env["CLAUDE_BIN"] == config.claude_bin
     assert child_env["CODEX_SESSION_ROOT"] == str(config.codex_session_root)
     assert child_env["CLAUDE_SESSION_ROOT"] == str(config.claude_session_root)
+
+
+def test_build_child_env_defaults_default_cwd_to_home_hidden_dir(monkeypatch, tmp_path: Path):
+    token = "123456:abcdefghijklmnopqrstuvwxyz12345"
+    runtime_paths = RuntimePaths.for_token(token, {"TIYA_HOME": str(tmp_path)})
+
+    monkeypatch.delenv("DEFAULT_CWD", raising=False)
+
+    child_env = cli._build_child_env(runtime_paths)
+
+    assert child_env["DEFAULT_CWD"] == str(default_working_dir())
 
 
 def test_start_rejects_when_instance_lock_is_occupied(monkeypatch, tmp_path: Path):

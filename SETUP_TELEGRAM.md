@@ -25,7 +25,7 @@ export ALLOWED_TELEGRAM_USER_IDS="123456789"  # optional but recommended
 export ALLOWED_CWD_ROOTS="/path/to/project"   # optional
 
 export DEFAULT_PROVIDER="codex"                # codex or claude
-export DEFAULT_CWD="/path/to/project"
+export DEFAULT_CWD="$HOME/.tiya"               # auto-created when missing
 
 # Optional if `codex` is already on PATH.
 # macOS auto-discovery also checks:
@@ -62,9 +62,8 @@ export TG_FORMATTING_FAIL_OPEN=1
 export TG_HTTP_MAX_RETRIES=2
 export TG_HTTP_RETRY_BASE_MS=300
 export TG_HTTP_RETRY_MAX_MS=3000
-# Linux default: ~/.local/state/tiya
-# macOS default: ~/Library/Application Support/tiya
-export TIYA_HOME="$HOME/.local/state/tiya"
+# Default: ~/.tiya
+export TIYA_HOME="$HOME/.tiya"
 # For repo-local runtime files during development:
 # export TIYA_HOME="$(pwd)/.runtime"
 

@@ -61,6 +61,19 @@ def test_load_config_defaults(monkeypatch, tmp_path: Path):
     assert config.tg_formatting_backend == "telegramify"
 
 
+def test_load_config_creates_missing_default_cwd(monkeypatch, tmp_path: Path):
+    default_cwd = tmp_path / ".tiya"
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:abcdefghijklmnopqrstuvwxyz12345")
+    monkeypatch.setenv("DEFAULT_CWD", str(default_cwd))
+    monkeypatch.setenv("STATE_PATH", str(tmp_path / "state.json"))
+    monkeypatch.setenv("STORAGE_PATH", str(tmp_path / "storage" / "tiya.db"))
+
+    config = load_config()
+
+    assert config.default_cwd == default_cwd
+    assert default_cwd.is_dir()
+
+
 def test_resolve_tg_proxy_precedence(monkeypatch):
     monkeypatch.setenv("TG_PROXY_URL", "http://proxy-a:8000")
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy-b:8000")

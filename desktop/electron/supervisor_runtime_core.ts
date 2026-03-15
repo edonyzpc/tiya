@@ -26,6 +26,16 @@ export interface SupervisorRuntimeLayout {
   legacySocketPath: string;
 }
 
+function expandHomePath(targetPath: string, homeDir: string): string {
+  if (targetPath === "~") {
+    return homeDir;
+  }
+  if (targetPath.startsWith("~/") || targetPath.startsWith("~\\")) {
+    return path.join(homeDir, targetPath.slice(2));
+  }
+  return targetPath;
+}
+
 export function childIsAlive(child: ChildProcessLike | null): boolean {
   return Boolean(child && child.exitCode === null && child.signalCode === null);
 }
@@ -37,6 +47,14 @@ export function buildSupervisorRuntimeLayout(runtimeRoot: string): SupervisorRun
     legacySupervisorDir: path.join(runtimeRoot, "daemon"),
     legacySocketPath: path.join(runtimeRoot, "daemon", "tiya.sock"),
   };
+}
+
+export function resolveDesktopRuntimeRoot(params: { configuredHome?: string | null; homeDir: string }): string {
+  const configuredHome = params.configuredHome?.trim();
+  if (configuredHome) {
+    return expandHomePath(configuredHome, params.homeDir);
+  }
+  return path.join(params.homeDir, ".tiya");
 }
 
 export async function migrateLegacySupervisorRuntime(params: {
