@@ -254,7 +254,7 @@ async def test_start_service_records_launch_id(monkeypatch, tmp_path: Path):
         )
         return _FakeProc(), runtime_paths
 
-    async def _noop_emit_status() -> None:
+    async def _noop_emit_status(_status=None) -> None:
         return None
 
     monkeypatch.setattr(supervisor, "_spawn_worker", _fake_spawn_worker)
@@ -270,3 +270,36 @@ async def test_start_service_records_launch_id(monkeypatch, tmp_path: Path):
     assert isinstance(status["workerStartedAt"], int)
     assert state["launchId"] == status["launchId"]
     assert state["workerStartedAt"] == status["workerStartedAt"]
+
+
+@pytest.mark.asyncio
+async def test_emit_status_skips_duplicate_health_updates(monkeypatch, tmp_path: Path):
+    env_file = tmp_path / "config" / "tiya.env"
+    monkeypatch.setenv("ENV_FILE", str(env_file))
+    monkeypatch.setenv("TIYA_HOME", str(tmp_path / "runtime"))
+    monkeypatch.setenv("TIYA_SECRET_STORE_BACKEND", "file")
+    monkeypatch.setattr(managed_config, "_is_runner_available", lambda _name: True)
+
+    write_env_file(
+        env_file,
+        {
+            "DEFAULT_PROVIDER": "codex",
+            "DEFAULT_CWD": str(tmp_path),
+        },
+    )
+
+    supervisor = TiyaSupervisor()
+    supervisor.secret_store.set(TELEGRAM_TOKEN_SECRET, "123456:abcdefghijklmnopqrstuvwxyz12345")
+    emitted: list[tuple[str, dict[str, object]]] = []
+
+    async def _capture(event_name: str, payload: dict[str, object]) -> None:
+        emitted.append((event_name, payload))
+
+    monkeypatch.setattr(supervisor, "_emit", _capture)
+
+    status = await supervisor.service_status(force_refresh=True)
+    await supervisor._emit_status(status)
+    await supervisor._emit_status(status)
+
+    health_events = [event_name for event_name, _payload in emitted if event_name == "health_updated"]
+    assert health_events == ["health_updated"]

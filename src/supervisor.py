@@ -111,6 +111,64 @@ class TiyaSupervisor:
         self._worker_proc: Optional[subprocess.Popen[bytes]] = None
         self._stopping_worker = False
         self._lock = ExclusiveFileLock(self.supervisor_paths.lock_file)
+        self._status_cache: Optional[dict[str, object]] = None
+        self._status_cache_signature: Optional[str] = None
+        self._status_cache_at = 0.0
+        self._runner_health_cache_key: Optional[str] = None
+        self._runner_health_cache_value: Optional[dict[str, dict[str, object]]] = None
+        self._runner_health_cache_at = 0.0
+        self._schema_status_cache_key: Optional[str] = None
+        self._schema_status_cache_value: Optional[dict[str, object]] = None
+        self._schema_status_cache_at = 0.0
+        self._recent_activity_cache_key: Optional[str] = None
+        self._recent_activity_cache_value: Optional[list[dict[str, object]]] = None
+        self._recent_activity_cache_at = 0.0
+        self._recent_errors_cache_key: Optional[tuple[str, int, int]] = None
+        self._recent_errors_cache_value: list[str] = []
+        self._diagnostics_cache_key: Optional[str] = None
+        self._diagnostics_cache_value: Optional[dict[str, object]] = None
+        self._diagnostics_cache_at = 0.0
+        self._session_root_refresh_at: dict[tuple[str, str], float] = {}
+
+    @staticmethod
+    def _cache_fresh(cached_at: float, ttl_sec: float) -> bool:
+        return cached_at > 0 and (time.monotonic() - cached_at) < ttl_sec
+
+    def _invalidate_runtime_caches(
+        self,
+        *,
+        status: bool = True,
+        diagnostics: bool = True,
+        checks: bool = False,
+        recent_activity: bool = False,
+    ) -> None:
+        if status:
+            self._status_cache = None
+            self._status_cache_signature = None
+            self._status_cache_at = 0.0
+        if diagnostics:
+            self._diagnostics_cache_key = None
+            self._diagnostics_cache_value = None
+            self._diagnostics_cache_at = 0.0
+        if checks:
+            self._runner_health_cache_key = None
+            self._runner_health_cache_value = None
+            self._runner_health_cache_at = 0.0
+            self._schema_status_cache_key = None
+            self._schema_status_cache_value = None
+            self._schema_status_cache_at = 0.0
+        if recent_activity:
+            self._recent_activity_cache_key = None
+            self._recent_activity_cache_value = None
+            self._recent_activity_cache_at = 0.0
+
+    @staticmethod
+    def _status_signature(status: dict[str, object]) -> str:
+        return json.dumps(status, ensure_ascii=False, sort_keys=True)
+
+    @staticmethod
+    def _status_cache_ttl(phase: str) -> float:
+        return 0.5 if phase in {"running", "starting", "stopping"} else 2.0
 
     def _load_token(self, *, refresh: bool = False) -> Optional[str]:
         if refresh or not self._token_cache_loaded:
@@ -313,20 +371,50 @@ class TiyaSupervisor:
         }
 
     def _schema_status(self, paths: Optional[RuntimePaths]) -> dict[str, object]:
+        cache_key = str(paths.db_file) if paths is not None else ""
+        if (
+            self._schema_status_cache_value is not None
+            and self._schema_status_cache_key == cache_key
+            and self._cache_fresh(self._schema_status_cache_at, 30.0)
+        ):
+            return self._schema_status_cache_value
         if paths is None:
-            return {"status": "missing", "message": "token is not configured yet"}
+            status = {"status": "missing", "message": "token is not configured yet"}
+            self._schema_status_cache_key = cache_key
+            self._schema_status_cache_value = status
+            self._schema_status_cache_at = time.monotonic()
+            return status
         message = legacy_cli._unsupported_storage_schema_message(paths.db_file)
         if message is None:
-            return {"status": "ok", "message": ""}
-        return {"status": "mismatch", "message": message}
+            status = {"status": "ok", "message": ""}
+        else:
+            status = {"status": "mismatch", "message": message}
+        self._schema_status_cache_key = cache_key
+        self._schema_status_cache_value = status
+        self._schema_status_cache_at = time.monotonic()
+        return status
 
     def _lock_status(self, token: Optional[str], paths: Optional[RuntimePaths], env_values: dict[str, str]) -> dict[str, object]:
         return self._foreign_worker_status(token, paths, env_values)
 
     def _runner_health(self, env_values: dict[str, str]) -> dict[str, dict[str, object]]:
+        cache_key = json.dumps(
+            {
+                "CODEX_BIN": env_values.get("CODEX_BIN") or "",
+                "CLAUDE_BIN": env_values.get("CLAUDE_BIN") or "",
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        if (
+            self._runner_health_cache_value is not None
+            and self._runner_health_cache_key == cache_key
+            and self._cache_fresh(self._runner_health_cache_at, 30.0)
+        ):
+            return self._runner_health_cache_value
         codex_bin = legacy_cli.resolve_codex_bin(env_values.get("CODEX_BIN") or None)
         claude_bin = legacy_cli.resolve_claude_bin(env_values.get("CLAUDE_BIN") or None)
-        return {
+        health = {
             "codex": {
                 "bin": codex_bin,
                 "available": legacy_cli._is_runner_available(codex_bin),
@@ -336,6 +424,10 @@ class TiyaSupervisor:
                 "available": legacy_cli._is_runner_available(claude_bin),
             },
         }
+        self._runner_health_cache_key = cache_key
+        self._runner_health_cache_value = health
+        self._runner_health_cache_at = time.monotonic()
+        return health
 
     def _read_supervisor_state(self) -> dict[str, object]:
         return read_state(self.supervisor_paths.state_file)
@@ -350,6 +442,13 @@ class TiyaSupervisor:
     def _recent_activity(self, paths: Optional[RuntimePaths]) -> list[dict[str, object]]:
         if paths is None or not paths.db_file.is_file():
             return []
+        cache_key = str(paths.db_file)
+        if (
+            self._recent_activity_cache_value is not None
+            and self._recent_activity_cache_key == cache_key
+            and self._cache_fresh(self._recent_activity_cache_at, 5.0)
+        ):
+            return self._recent_activity_cache_value
         items: list[dict[str, object]] = []
         try:
             with sqlite3.connect(str(paths.db_file)) as conn:
@@ -410,6 +509,9 @@ class TiyaSupervisor:
                     ),
                 }
             )
+        self._recent_activity_cache_key = cache_key
+        self._recent_activity_cache_value = items
+        self._recent_activity_cache_at = time.monotonic()
         return items
 
     def _service_phase(
@@ -439,7 +541,12 @@ class TiyaSupervisor:
             return "crashed"
         return "stopped"
 
-    async def service_status(self) -> dict[str, object]:
+    async def service_status(self, *, force_refresh: bool = False) -> dict[str, object]:
+        if self._status_cache is not None and not force_refresh:
+            cached_phase = str(self._status_cache.get("phase") or "")
+            if self._cache_fresh(self._status_cache_at, self._status_cache_ttl(cached_phase)):
+                return self._status_cache
+
         snapshot = self._snapshot()
         secret_status = self.secret_store.get_status(TELEGRAM_TOKEN_SECRET)
         env_values = normalize_snapshot(snapshot)
@@ -520,6 +627,9 @@ class TiyaSupervisor:
             "secrets": snapshot["secrets"],
         }
         self._write_supervisor_state(phase=phase, supervisorPid=os.getpid(), workerPid=worker_pid, readyAt=worker_state.get("readyAt"))
+        self._status_cache = status
+        self._status_cache_signature = self._status_signature(status)
+        self._status_cache_at = time.monotonic()
         return status
 
     async def _emit(self, event_name: str, payload: dict[str, object]) -> None:
@@ -536,36 +646,28 @@ class TiyaSupervisor:
         for writer in dead:
             self._subscribers.discard(writer)
 
-    async def _emit_status(self) -> None:
-        status = await self.service_status()
-        phase = str(status["phase"])
-        worker_pid = status["workerPid"] if isinstance(status["workerPid"], int) else None
-        signature = json.dumps(
-            {
-                "phase": phase,
-                "workerPid": worker_pid,
-                "launchId": status.get("launchId"),
-                "workerStartedAt": status.get("workerStartedAt"),
-                "readyAt": status["readyAt"],
-                "blockingIssues": status["blockingIssues"],
-                "warnings": status["warnings"],
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-        )
-        if signature != self._last_status_signature:
-            self._last_status_signature = signature
-            await self._emit("service_phase_changed", status)
+    async def _emit_status(self, status: Optional[dict[str, object]] = None) -> None:
+        next_status = status or await self.service_status(force_refresh=True)
+        signature = self._status_signature(next_status)
+        if signature == self._last_status_signature:
+            return
+
+        phase = str(next_status["phase"])
+        worker_pid = next_status["workerPid"] if isinstance(next_status["workerPid"], int) else None
+        if phase != self._last_phase:
+            await self._emit("service_phase_changed", next_status)
         if worker_pid is not None and self._last_worker_pid != worker_pid:
-            await self._emit("worker_started", status)
+            await self._emit("worker_started", next_status)
         if self._last_worker_pid is not None and worker_pid is None:
             if phase == "crashed":
-                await self._emit("worker_crashed", status)
+                await self._emit("worker_crashed", next_status)
             else:
-                await self._emit("worker_stopped", status)
+                await self._emit("worker_stopped", next_status)
+
+        self._last_status_signature = signature
         self._last_phase = phase
         self._last_worker_pid = worker_pid
-        await self._emit("health_updated", status)
+        await self._emit("health_updated", next_status)
 
     def _spawn_worker(
         self,
@@ -609,7 +711,9 @@ class TiyaSupervisor:
         legacy_cli._remove_pid_file(runtime_paths)
         phase = "stopped" if self._stopping_worker else "crashed"
         self._write_supervisor_state(phase=phase, supervisorPid=os.getpid(), workerPid=None, lastReturnCode=rc)
-        await self._emit_status()
+        self._invalidate_runtime_caches(recent_activity=True, diagnostics=True)
+        status = await self.service_status(force_refresh=True)
+        await self._emit_status(status)
 
     async def _stop_owned_worker(self, *, token: Optional[str], timeout_sec: float = 10.0) -> bool:
         runtime_paths = self._runtime_paths(token)
@@ -649,16 +753,16 @@ class TiyaSupervisor:
         env_values = normalize_snapshot(snapshot)
         token = self._load_token()
         if not validation["ok"] or not token:
-            status = await self.service_status()
+            status = await self.service_status(force_refresh=True)
             return {"status": status, "output": "", "started": False}
 
         owned_worker_pid = self._current_worker_pid()
         if owned_worker_pid is not None:
-            status = await self.service_status()
-            await self._emit_status()
+            status = await self.service_status(force_refresh=True)
+            await self._emit_status(status)
             return {"status": status, "output": "", "started": True}
 
-        status = await self.service_status()
+        status = await self.service_status(force_refresh=True)
         if status["blockingIssues"]:
             return {"status": status, "output": "", "started": False}
 
@@ -678,8 +782,9 @@ class TiyaSupervisor:
             workerStartedAt=worker_started_at,
             lastOutput="",
         )
-        status = await self.service_status()
-        await self._emit_status()
+        self._invalidate_runtime_caches(recent_activity=True, diagnostics=True)
+        status = await self.service_status(force_refresh=True)
+        await self._emit_status(status)
         output = f"[info] supervisor started worker\n[ok] Worker PID={proc.pid}\n[ok] Worker log: {runtime_paths.log_file}"
         return {"status": status, "output": output, "started": True}
 
@@ -688,12 +793,12 @@ class TiyaSupervisor:
         env_values = normalize_snapshot(snapshot)
         token = self._load_token()
         if not token:
-            status = await self.service_status()
+            status = await self.service_status(force_refresh=True)
             return {"status": status, "output": "", "stopped": True}
 
         lock_status = self._lock_status(token, self._runtime_paths(token), env_values)
         if self._current_worker_pid() is None:
-            status = await self.service_status()
+            status = await self.service_status(force_refresh=True)
             return {"status": status, "output": "", "stopped": not bool(lock_status.get("conflict"))}
 
         stopped = await self._stop_owned_worker(token=token)
@@ -703,8 +808,9 @@ class TiyaSupervisor:
             workerPid=None,
             lastOutput="",
         )
-        status = await self.service_status()
-        await self._emit_status()
+        self._invalidate_runtime_caches(recent_activity=True, diagnostics=True)
+        status = await self.service_status(force_refresh=True)
+        await self._emit_status(status)
         return {"status": status, "output": "", "stopped": stopped}
 
     async def restart_service(self) -> dict[str, object]:
@@ -730,8 +836,10 @@ class TiyaSupervisor:
         if not validation["ok"]:
             raise RpcError("config_invalid", "configuration is invalid")
         persisted = persist_snapshot(paths=self.config_paths, payload=payload)
+        self._invalidate_runtime_caches(checks=True, recent_activity=True)
         await self._emit("config_changed", {"envPath": str(self.config_paths.env_file)})
-        await self._emit_status()
+        status = await self.service_status(force_refresh=True)
+        await self._emit_status(status)
         return {
             "env": persisted["env"],
             "secrets": (await self.config_get())["secrets"],
@@ -753,8 +861,10 @@ class TiyaSupervisor:
             raise RpcError("secret_store_error", _sanitize_text(str(exc) or "failed to store Telegram bot token")) from exc
         self._token_cache = value
         self._token_cache_loaded = True
+        self._invalidate_runtime_caches(checks=True, recent_activity=True)
         await self._emit("config_changed", {"secret": "telegramToken"})
-        await self._emit_status()
+        status_payload = await self.service_status(force_refresh=True)
+        await self._emit_status(status_payload)
         return {
             "present": status.present,
             "updatedAt": status.updated_at,
@@ -775,8 +885,10 @@ class TiyaSupervisor:
             raise RpcError("secret_store_error", _sanitize_text(str(exc) or "failed to clear Telegram bot token")) from exc
         self._token_cache = None
         self._token_cache_loaded = True
+        self._invalidate_runtime_caches(checks=True, recent_activity=True)
         await self._emit("config_changed", {"secret": "telegramToken"})
-        await self._emit_status()
+        status_payload = await self.service_status(force_refresh=True)
+        await self._emit_status(status_payload)
         return {
             "present": status.present,
             "updatedAt": status.updated_at,
@@ -806,6 +918,31 @@ class TiyaSupervisor:
         )
         return manager, runtime_paths, env_values
 
+    def _read_recent_errors(self, log_path: Path) -> list[str]:
+        try:
+            stat = log_path.stat()
+            cache_key = (str(log_path), int(stat.st_mtime_ns), int(stat.st_size))
+        except OSError:
+            cache_key = (str(log_path), 0, 0)
+        if self._recent_errors_cache_key == cache_key:
+            return self._recent_errors_cache_value
+        if log_path.is_file():
+            recent_errors = [_sanitize_text(line) for line in legacy_cli._tail_last_lines(log_path, lines=20)]
+        else:
+            recent_errors = []
+        self._recent_errors_cache_key = cache_key
+        self._recent_errors_cache_value = recent_errors
+        return recent_errors
+
+    def _session_root_refresh_due(self, provider: str, root: Path) -> bool:
+        cache_key = (provider, str(root.expanduser().resolve()))
+        last_refreshed_at = self._session_root_refresh_at.get(cache_key, 0.0)
+        return (time.monotonic() - last_refreshed_at) >= 2.0
+
+    def _mark_session_root_refreshed(self, provider: str, root: Path) -> None:
+        cache_key = (provider, str(root.expanduser().resolve()))
+        self._session_root_refresh_at[cache_key] = time.monotonic()
+
     async def sessions_list(self, params: dict[str, object]) -> dict[str, object]:
         provider = str(params.get("provider") or "codex")
         limit = max(1, int(params.get("limit") or 20))
@@ -815,7 +952,9 @@ class TiyaSupervisor:
             root = Path(
                 env_values.get("CODEX_SESSION_ROOT") if provider == "codex" else env_values.get("CLAUDE_SESSION_ROOT") or ""
             ).expanduser()
-            await manager.sessions.refresh_session_root(provider, root)  # type: ignore[arg-type]
+            if self._session_root_refresh_due(provider, root):
+                await manager.sessions.refresh_session_root(provider, root)  # type: ignore[arg-type]
+                self._mark_session_root_refreshed(provider, root)
             sessions = await manager.sessions.list_recent_sessions(provider, root, limit)  # type: ignore[arg-type]
             active_session_id: Optional[str] = None
             if isinstance(user_id, int):
@@ -872,10 +1011,8 @@ class TiyaSupervisor:
     async def diagnostics_report(self) -> dict[str, object]:
         status = await self.service_status()
         runtime_paths = status["runtimePaths"]
-        recent_errors: list[str] = []
         log_path = Path(str(status["logPath"]))
-        if log_path.is_file():
-            recent_errors = [_sanitize_text(line) for line in legacy_cli._tail_last_lines(log_path, lines=20)]
+        recent_errors = self._read_recent_errors(log_path)
         session_roots = []
         env_values = self._current_env_values()
         for key in ("CODEX_SESSION_ROOT", "CLAUDE_SESSION_ROOT"):
@@ -888,6 +1025,22 @@ class TiyaSupervisor:
                     "readable": os.access(path, os.R_OK) if path.exists() else False,
                 }
             )
+        diagnostics_key = json.dumps(
+            {
+                "status": self._status_signature(status),
+                "log": list(self._recent_errors_cache_key or (str(log_path), 0, 0)),
+                "sessionRoots": session_roots,
+                "secretStoreStatus": self._secret_status(),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        if (
+            self._diagnostics_cache_value is not None
+            and self._diagnostics_cache_key == diagnostics_key
+            and self._cache_fresh(self._diagnostics_cache_at, 2.0)
+        ):
+            return self._diagnostics_cache_value
         report = {
             "envPath": runtime_paths.get("envPath"),
             "runtimeRoot": runtime_paths.get("runtimeRoot"),
@@ -900,11 +1053,15 @@ class TiyaSupervisor:
             "schemaStatus": status["schemaStatus"],
             "runnerHealth": status["runnerHealth"],
             "sessionRoots": session_roots,
-            "secretStoreStatus": self._secret_status(),
+            "secretStoreStatus": json.loads(json.dumps(self._secret_status())),
             "recentErrors": recent_errors,
             "recommendedActions": [issue["message"] for issue in status["blockingIssues"]] or ["No blocking issues detected."],
         }
-        return self._redact_diagnostics_report(report)
+        redacted = self._redact_diagnostics_report(report)
+        self._diagnostics_cache_key = diagnostics_key
+        self._diagnostics_cache_value = redacted
+        self._diagnostics_cache_at = time.monotonic()
+        return redacted
 
     async def diagnostics_export(self, params: dict[str, object]) -> dict[str, object]:
         destination = params.get("destinationPath")
@@ -1030,7 +1187,7 @@ class TiyaSupervisor:
                         lines = [_sanitize_text(line) for line in chunk.splitlines() if line.strip()]
                         if lines:
                             await self._emit("log_appended", {"path": str(log_path), "lines": lines})
-                await self._emit_status()
+                await self._emit_status(status)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
