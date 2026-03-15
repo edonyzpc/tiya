@@ -10,6 +10,11 @@
     "type": "git",
     "url": "git+https://github.com/edonyzpc/tiya.git"
   },
+  "packageManager": "npm@11.9.0",
+  "engines": {
+    "node": ">=24 <25",
+    "npm": ">=11 <12"
+  },
   "main": "dist-electron/electron/main.js",
   "scripts": {
     "build": "npm run build:renderer && npm run build:electron",

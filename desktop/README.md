@@ -3,6 +3,7 @@
 ## Development
 
 - From the repo root you can drive the desktop workspace with `uv run desktop ...`.
+- Use Node `24` LTS with npm `11`. If you use `nvm`, run `nvm use` from the repo root.
 - Install desktop dependencies with `npm ci`.
 - Run the desktop shell in development with `npm run dev`.
 - Typecheck both renderer and Electron code with `npm run typecheck`.
@@ -33,6 +34,7 @@ Examples from the repo root:
 ## Lockfiles
 
 - Commit `desktop/package-lock.json` whenever desktop dependencies change.
+- Regenerate the desktop lockfile with Node `24` / npm `11` so platform optional packages stay in sync with `package.json`.
 - Use `npm ci` in CI and local verification to enforce lockfile fidelity.
 - Commit `uv.lock` whenever Python packaging dependencies change, including sidecar build tools such as `PyInstaller`.
 - Do not hand-edit either lockfile.
