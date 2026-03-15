@@ -104,11 +104,12 @@ def test_macos_packaging_uses_universal_targets():
     release_universal = workflow.split("  release-macos-universal:\n", maxsplit=1)[1].split(
         "  publish-release:\n", maxsplit=1
     )[0]
-    assert "uses: astral-sh/setup-uv@v5" in beta_universal
+    assert "uses: actions/setup-python@v6" in beta_universal
+    assert "uses: astral-sh/setup-uv@v7" in beta_universal
     assert "name: Sync Python dependencies" in beta_universal
     assert "run: uv sync --group dev" in beta_universal
-    assert "uses: actions/setup-python@v5" in release_universal
-    assert "uses: astral-sh/setup-uv@v5" in release_universal
+    assert "uses: actions/setup-python@v6" in release_universal
+    assert "uses: astral-sh/setup-uv@v7" in release_universal
     assert "name: Sync Python dependencies" in release_universal
     assert "run: uv sync --group dev" in release_universal
 
@@ -124,7 +125,10 @@ def test_macos_x64_arch_allowlist_matches_hidden_sidecar_dylibs():
         "Contents/Resources/tiya-backend/tiya-worker/macos-arm64/_internal/PIL/.dylibs/libXau.6.dylib",
     ]
     script = f"""
-const minimatch = require('./desktop/node_modules/minimatch');
+const minimatchModule = require('./desktop/node_modules/minimatch');
+const minimatch = typeof minimatchModule === 'function'
+  ? minimatchModule
+  : minimatchModule.minimatch;
 const pattern = {pattern!r};
 const samplePaths = {sample_paths!r};
 for (const samplePath of samplePaths) {{

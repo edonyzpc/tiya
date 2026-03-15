@@ -34,16 +34,16 @@ jobs:
     name: Preflight
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v5
-      - uses: actions/setup-node@v4
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "24"
           cache: "npm"
           cache-dependency-path: desktop/package-lock.json
       - name: Sync Python dependencies
@@ -65,16 +65,16 @@ jobs:
     env:
       TIYA_DESKTOP_TARGET_ARCH: x64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v5
-      - uses: actions/setup-node@v4
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "24"
           cache: "npm"
           cache-dependency-path: desktop/package-lock.json
       - name: Sync Python dependencies
@@ -104,16 +104,16 @@ jobs:
     env:
       TIYA_DESKTOP_TARGET_ARCH: arm64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v5
-      - uses: actions/setup-node@v4
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "24"
           cache: "npm"
           cache-dependency-path: desktop/package-lock.json
       - name: Sync Python dependencies
@@ -145,12 +145,12 @@ jobs:
     env:
       TIYA_DESKTOP_TARGET_ARCH: arm64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "24"
           cache: "npm"
           cache-dependency-path: desktop/package-lock.json
       - name: Install desktop dependencies
@@ -185,8 +185,8 @@ jobs:
     outputs:
       version: ${{ steps.beta_version.outputs.value }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Compute beta desktop version
@@ -204,14 +204,14 @@ jobs:
     env:
       TIYA_DESKTOP_TARGET_ARCH: x64
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v5
-      - uses: actions/setup-node@v4
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "24"
           cache: "npm"
           cache-dependency-path: desktop/package-lock.json
       - name: Sync Python dependencies
@@ -249,14 +249,14 @@ jobs:
     env:
       TIYA_DESKTOP_TARGET_ARCH: arm64
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v5
-      - uses: actions/setup-node@v4
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "24"
           cache: "npm"
           cache-dependency-path: desktop/package-lock.json
       - name: Sync Python dependencies
@@ -292,13 +292,13 @@ jobs:
     env:
       TIYA_DESKTOP_TARGET_ARCH: arm64
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "24"
           cache: "npm"
           cache-dependency-path: desktop/package-lock.json
       - name: Install desktop dependencies
@@ -341,14 +341,14 @@ jobs:
     env:
       TIYA_DESKTOP_TARGET_ARCH: x64
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v5
-      - uses: actions/setup-node@v4
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "24"
       - name: Sync Python dependencies
         run: uv sync --group dev
       - name: Build x64 macOS sidecars
@@ -374,14 +374,14 @@ jobs:
     env:
       TIYA_DESKTOP_TARGET_ARCH: arm64
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v5
-      - uses: actions/setup-node@v4
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "24"
       - name: Sync Python dependencies
         run: uv sync --group dev
       - name: Build arm64 macOS sidecars
@@ -410,14 +410,14 @@ jobs:
     env:
       TIYA_DESKTOP_TARGET_ARCH: universal
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v5
-      - uses: actions/setup-node@v4
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "24"
           cache: "npm"
           cache-dependency-path: desktop/package-lock.json
       - name: Sync Python dependencies
@@ -522,10 +522,10 @@ jobs:
     outputs:
       version: ${{ steps.release_version.outputs.value }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Verify release tag
@@ -552,14 +552,14 @@ jobs:
     env:
       TIYA_DESKTOP_TARGET_ARCH: x64
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v5
-      - uses: actions/setup-node@v4
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "24"
           cache: "npm"
           cache-dependency-path: desktop/package-lock.json
       - name: Sync Python dependencies
@@ -594,14 +594,14 @@ jobs:
     env:
       TIYA_DESKTOP_TARGET_ARCH: arm64
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v5
-      - uses: actions/setup-node@v4
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "24"
           cache: "npm"
           cache-dependency-path: desktop/package-lock.json
       - name: Sync Python dependencies
@@ -635,10 +635,10 @@ jobs:
     env:
       TIYA_DESKTOP_TARGET_ARCH: arm64
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "24"
           cache: "npm"
           cache-dependency-path: desktop/package-lock.json
       - name: Install desktop dependencies
@@ -679,14 +679,14 @@ jobs:
     env:
       TIYA_DESKTOP_TARGET_ARCH: x64
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v5
-      - uses: actions/setup-node@v4
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "24"
       - name: Sync Python dependencies
         run: uv sync --group dev
       - name: Build x64 macOS sidecars
@@ -712,14 +712,14 @@ jobs:
     env:
       TIYA_DESKTOP_TARGET_ARCH: arm64
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v5
-      - uses: actions/setup-node@v4
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "24"
       - name: Sync Python dependencies
         run: uv sync --group dev
       - name: Build arm64 macOS sidecars
@@ -748,14 +748,14 @@ jobs:
     env:
       TIYA_DESKTOP_TARGET_ARCH: universal
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v5
-      - uses: actions/setup-node@v4
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "24"
           cache: "npm"
           cache-dependency-path: desktop/package-lock.json
       - name: Sync Python dependencies
