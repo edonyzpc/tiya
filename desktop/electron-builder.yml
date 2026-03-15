@@ -4,7 +4,8 @@ artifactName: ${productName}-${version}-${os}-${arch}.${ext}
 directories:
   buildResources: assets
   output: release
-electronDist: node_modules/electron/dist
+# Do not force a single host-arch Electron dist here. macOS universal builds
+# need electron-builder to resolve per-arch Electron archives for x64 + arm64.
 files:
   - dist-renderer/**
   - dist-electron/**

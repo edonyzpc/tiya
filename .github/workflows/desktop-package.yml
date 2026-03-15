@@ -451,6 +451,17 @@ jobs:
       - name: Build universal beta package
         working-directory: desktop
         run: npm run package:mac
+      - name: Verify universal beta app architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_path="desktop/release/mac-universal/tiya.app"
+          executable_name="$("/usr/libexec/PlistBuddy" -c 'Print :CFBundleExecutable' "$app_path/Contents/Info.plist")"
+          main_binary="$app_path/Contents/MacOS/$executable_name"
+          framework_binary="$app_path/Contents/Frameworks/Electron Framework.framework/Versions/A/Electron Framework"
+
+          lipo -verify_arch x86_64 arm64 "$main_binary"
+          lipo -verify_arch x86_64 arm64 "$framework_binary"
       - name: Generate checksums
         shell: bash
         run: |
@@ -776,6 +787,17 @@ jobs:
       - name: Build universal release package
         working-directory: desktop
         run: npm run package:mac
+      - name: Verify universal release app architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_path="desktop/release/mac-universal/tiya.app"
+          executable_name="$("/usr/libexec/PlistBuddy" -c 'Print :CFBundleExecutable' "$app_path/Contents/Info.plist")"
+          main_binary="$app_path/Contents/MacOS/$executable_name"
+          framework_binary="$app_path/Contents/Frameworks/Electron Framework.framework/Versions/A/Electron Framework"
+
+          lipo -verify_arch x86_64 arm64 "$main_binary"
+          lipo -verify_arch x86_64 arm64 "$framework_binary"
       - name: Generate checksums
         shell: bash
         run: |
