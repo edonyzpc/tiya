@@ -75,6 +75,14 @@ def test_linux_packaging_supports_arm64_repack_flow():
     assert "package:rpm:prepackaged" in workflow
 
 
+def test_linux_builder_uses_desktop_entry_block():
+    repo_root = Path(__file__).resolve().parent.parent
+    builder_config = (repo_root / "desktop" / "electron-builder.yml").read_text(encoding="utf-8")
+
+    assert "desktop:\n    entry:\n      StartupWMClass: tiya" in builder_config
+    assert "desktop:\n    Name: tiya\n    StartupWMClass: tiya" not in builder_config
+
+
 def test_macos_packaging_uses_universal_targets():
     repo_root = Path(__file__).resolve().parent.parent
     package_json = json.loads((repo_root / "desktop" / "package.json").read_text(encoding="utf-8"))

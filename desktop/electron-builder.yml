@@ -22,8 +22,8 @@ linux:
   executableName: tiya-desktop
   icon: icons
   desktop:
-    Name: tiya
-    StartupWMClass: tiya
+    entry:
+      StartupWMClass: tiya
   target:
     - target: dir
     - target: zip
