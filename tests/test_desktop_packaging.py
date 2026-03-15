@@ -81,6 +81,8 @@ def test_linux_builder_uses_desktop_entry_block():
 
     assert "desktop:\n    entry:\n      StartupWMClass: tiya" in builder_config
     assert "desktop:\n    Name: tiya\n    StartupWMClass: tiya" not in builder_config
+    assert '- "!node_modules/@esbuild/**"' in builder_config
+    assert '- "!node_modules/@rollup/**"' in builder_config
 
 
 def test_macos_packaging_uses_universal_targets():

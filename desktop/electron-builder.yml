@@ -10,6 +10,11 @@ files:
   - dist-renderer/**
   - dist-electron/**
   - package.json
+  # Keep host-specific build tool binaries out of the packaged app. They are
+  # only needed during bundling, but direct optional deps make them visible to
+  # electron-builder's production-dependency scan.
+  - "!node_modules/@esbuild/**"
+  - "!node_modules/@rollup/**"
 extraResources:
   - from: ../dist/desktop-sidecars/tiya-supervisor
     to: tiya-backend/tiya-supervisor
