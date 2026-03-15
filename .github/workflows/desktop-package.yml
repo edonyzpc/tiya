@@ -460,8 +460,8 @@ jobs:
           main_binary="$app_path/Contents/MacOS/$executable_name"
           framework_binary="$app_path/Contents/Frameworks/Electron Framework.framework/Versions/A/Electron Framework"
 
-          lipo -verify_arch x86_64 arm64 "$main_binary"
-          lipo -verify_arch x86_64 arm64 "$framework_binary"
+          lipo "$main_binary" -verify_arch x86_64 arm64
+          lipo "$framework_binary" -verify_arch x86_64 arm64
       - name: Generate checksums
         shell: bash
         run: |
@@ -796,8 +796,8 @@ jobs:
           main_binary="$app_path/Contents/MacOS/$executable_name"
           framework_binary="$app_path/Contents/Frameworks/Electron Framework.framework/Versions/A/Electron Framework"
 
-          lipo -verify_arch x86_64 arm64 "$main_binary"
-          lipo -verify_arch x86_64 arm64 "$framework_binary"
+          lipo "$main_binary" -verify_arch x86_64 arm64
+          lipo "$framework_binary" -verify_arch x86_64 arm64
       - name: Generate checksums
         shell: bash
         run: |
