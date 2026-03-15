@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -106,7 +107,8 @@ def test_macos_packaging_uses_universal_targets():
     assert "Missing prepared macOS universal sidecar asset" in packaging_script
     assert "macos-x64" in sidecar_bundle_script
     assert "macos-arm64" in sidecar_bundle_script
-    assert "dereference: true" in sidecar_bundle_script
+    assert "verbatimSymlinks: true" in sidecar_bundle_script
+    assert "dereference: true" not in sidecar_bundle_script
     assert 'case "$(uname -m)"' in sidecar_bundle_script
     beta_universal = workflow.split("  beta-macos-universal:\n", maxsplit=1)[1].split(
         "  release-metadata:\n", maxsplit=1
@@ -153,6 +155,49 @@ for (const samplePath of samplePaths) {{
         cwd=repo_root,
         check=True,
     )
+
+
+def test_prepare_mac_universal_sidecars_preserves_framework_symlinks(tmp_path):
+    repo_root = Path(__file__).resolve().parent.parent
+    desktop_root = repo_root / "desktop"
+    input_roots = {
+        "x64": tmp_path / "x64",
+        "arm64": tmp_path / "arm64",
+    }
+    output_root = tmp_path / "output"
+
+    for source_root in input_roots.values():
+        for binary_name in ("tiya-supervisor", "tiya-worker"):
+            bundle_root = source_root / binary_name
+            framework_root = bundle_root / "_internal" / "Python.framework"
+            version_root = framework_root / "Versions" / "A"
+            version_root.mkdir(parents=True)
+            (bundle_root / binary_name).write_text("#!/bin/sh\n", encoding="utf-8")
+            python_binary = version_root / "Python"
+            python_binary.write_text("binary", encoding="utf-8")
+            os.symlink("A", framework_root / "Versions" / "Current")
+            os.symlink("Versions/Current/Python", framework_root / "Python")
+
+    subprocess.run(
+        [
+            "node",
+            "scripts/prepare-mac-universal-sidecars.mjs",
+            "--x64",
+            str(input_roots["x64"]),
+            "--arm64",
+            str(input_roots["arm64"]),
+            "--output",
+            str(output_root),
+        ],
+        cwd=desktop_root,
+        check=True,
+    )
+
+    copied_framework = output_root / "tiya-supervisor" / "macos-arm64" / "_internal" / "Python.framework"
+    assert copied_framework.joinpath("Python").is_symlink()
+    assert os.readlink(copied_framework / "Python") == "Versions/Current/Python"
+    assert copied_framework.joinpath("Versions", "Current").is_symlink()
+    assert os.readlink(copied_framework / "Versions" / "Current") == "A"
 
 
 def test_beta_workflow_publishes_github_prerelease():

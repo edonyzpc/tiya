@@ -80,7 +80,10 @@ async function copySidecarVariant(outputRoot, archKey, sourceRoot, binaryName) {
   const variantDir = path.join(outputRoot, binaryName, ARCHITECTURES[archKey]);
   await cp(path.join(sourceRoot, binaryName), variantDir, {
     recursive: true,
-    dereference: true
+    // PyInstaller bundles Python.framework as a symlink tree. Preserve the
+    // original links verbatim so the copied framework still has a valid macOS
+    // bundle layout for codesign inside the final app.
+    verbatimSymlinks: true
   });
 }
 
