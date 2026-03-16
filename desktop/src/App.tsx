@@ -12,6 +12,7 @@ import {
 
 import type {
   ConfigSnapshot,
+  DesktopBridge,
   DesktopBootstrap,
   DesktopEvent,
   DoctorReport,
@@ -28,6 +29,7 @@ import { advancedFields, basicFields, type FieldDefinition, wizardSteps } from "
 type ViewKey = "overview" | "config" | "sessions" | "logs" | "themes";
 type DiagnosticsTab = "logs" | "diagnostics";
 type ThemeKey = "graphite-emerald" | "charcoal-brass" | "stone-moss";
+type NavIconKey = "overview" | "config" | "sessions" | "logs" | "themes";
 type ThemePreviewSample = {
   key: ThemeKey;
   name: string;
@@ -65,15 +67,17 @@ type ServiceActionResult = {
   restarted?: boolean;
 };
 
-const navItems: Array<{ key: ViewKey; label: string; eyebrow: string }> = [
-  { key: "overview", label: "Overview", eyebrow: "01" },
-  { key: "config", label: "Config", eyebrow: "02" },
-  { key: "sessions", label: "Sessions", eyebrow: "03" },
-  { key: "logs", label: "Logs & Diagnostics", eyebrow: "04" },
-  { key: "themes", label: "Themes", eyebrow: "05" }
+const navItems: Array<{ key: ViewKey; label: string; eyebrow: string; icon: NavIconKey; section: "core" | "lab" }> = [
+  { key: "overview", label: "Overview", eyebrow: "01", icon: "overview", section: "core" },
+  { key: "config", label: "Config", eyebrow: "02", icon: "config", section: "core" },
+  { key: "sessions", label: "Sessions", eyebrow: "03", icon: "sessions", section: "core" },
+  { key: "logs", label: "Logs & Diagnostics", eyebrow: "04", icon: "logs", section: "core" },
+  { key: "themes", label: "Themes", eyebrow: "05", icon: "themes", section: "lab" }
 ];
 
 const themeStorageKey = "tiya.desktop.theme";
+const DESKTOP_BRIDGE_UNAVAILABLE_MESSAGE =
+  "Desktop bridge is unavailable. Start tiya desktop from Electron; opening the Vite dev server URL directly will not work.";
 
 const themeSamples: ThemePreviewSample[] = [
   {
@@ -236,6 +240,36 @@ function resolveSecretBackendGuidance(secret: ConfigSnapshot["secrets"]["telegra
   return "Secret backend is unavailable on this host.";
 }
 
+function matchesWorkspaceQuery(query: string, ...values: Array<string | number | null | undefined>): boolean {
+  if (!query) {
+    return true;
+  }
+  return values.some((value) => String(value ?? "").toLowerCase().includes(query));
+}
+
+function countReadyRunners(status: ServiceStatus | null): number {
+  if (!status) {
+    return 0;
+  }
+  return Number(status.runnerHealth.codex.available) + Number(status.runnerHealth.claude.available);
+}
+
+function buildWorkspaceSearchPlaceholder(view: ViewKey): string {
+  if (view === "overview") {
+    return "Search activity, warnings, and runtime paths";
+  }
+  if (view === "config") {
+    return "Filter configuration fields by name or hint";
+  }
+  if (view === "sessions") {
+    return "Search sessions, paths, or message preview";
+  }
+  if (view === "logs") {
+    return "Filter logs, diagnostics, and recommended actions";
+  }
+  return "Search visual directions and theme notes";
+}
+
 function didServiceActionSucceed(action: ServiceAction, result: ServiceActionResult): boolean {
   if (action === "start") {
     return Boolean(result.started);
@@ -294,6 +328,34 @@ function waitForNextPaint(): Promise<void> {
   });
 }
 
+function getDesktopBridge(): DesktopBridge | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  const bridge = window.tiyaDesktop;
+  if (
+    !bridge?.desktop ||
+    !bridge?.service ||
+    !bridge?.config ||
+    !bridge?.sessions ||
+    !bridge?.diagnostics ||
+    !bridge?.dialog ||
+    !bridge?.shell ||
+    !bridge?.events
+  ) {
+    return null;
+  }
+  return bridge;
+}
+
+function requireDesktopBridge(): DesktopBridge {
+  const bridge = getDesktopBridge();
+  if (!bridge) {
+    throw new Error(DESKTOP_BRIDGE_UNAVAILABLE_MESSAGE);
+  }
+  return bridge;
+}
+
 function useDesktopRuntime(setNotice: Dispatch<SetStateAction<Notice | null>>) {
   const [bootstrap, setBootstrap] = useState<DesktopBootstrap | null>(null);
   const [initState, setInitState] = useState<DesktopBootstrap["initState"]>({
@@ -310,6 +372,14 @@ function useDesktopRuntime(setNotice: Dispatch<SetStateAction<Notice | null>>) {
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [fatalError, setFatalError] = useState<string | null>(null);
   const lastInitErrorRef = useRef<string | null>(null);
+
+  function recordRuntimeError(message: string): void {
+    setFatalError(message);
+    setInitState((current) => ({
+      ...current,
+      initError: message
+    }));
+  }
 
   function applyBootstrap(nextBootstrap: DesktopBootstrap): void {
     startTransition(() => {
@@ -329,9 +399,10 @@ function useDesktopRuntime(setNotice: Dispatch<SetStateAction<Notice | null>>) {
   async function loadRuntimeData(params: { suppressNotice?: boolean; resetDraft?: boolean } = {}): Promise<void> {
     const { suppressNotice = false, resetDraft = false } = params;
     try {
+      const bridge = requireDesktopBridge();
       const [nextStatus, nextConfig] = await Promise.all([
-        window.tiyaDesktop.service.status(),
-        window.tiyaDesktop.config.get()
+        bridge.service.status(),
+        bridge.config.get()
       ]);
       startTransition(() => {
         setStatus(nextStatus);
@@ -346,7 +417,7 @@ function useDesktopRuntime(setNotice: Dispatch<SetStateAction<Notice | null>>) {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      setFatalError(message);
+      recordRuntimeError(message);
       if (!suppressNotice) {
         setNotice({
           tone: "danger",
@@ -359,7 +430,8 @@ function useDesktopRuntime(setNotice: Dispatch<SetStateAction<Notice | null>>) {
   async function hydrate(): Promise<void> {
     setBusyAction("hydrate");
     try {
-      const nextBootstrap = await window.tiyaDesktop.desktop.bootstrap();
+      const bridge = requireDesktopBridge();
+      const nextBootstrap = await bridge.desktop.bootstrap();
       applyBootstrap(nextBootstrap);
       await loadRuntimeData({ resetDraft: true });
     } finally {
@@ -369,9 +441,18 @@ function useDesktopRuntime(setNotice: Dispatch<SetStateAction<Notice | null>>) {
 
   useEffect(() => {
     let cancelled = false;
+    const bridge = getDesktopBridge();
+    if (!bridge) {
+      recordRuntimeError(DESKTOP_BRIDGE_UNAVAILABLE_MESSAGE);
+      setNotice({
+        tone: "danger",
+        text: DESKTOP_BRIDGE_UNAVAILABLE_MESSAGE
+      });
+      return;
+    }
     void (async () => {
       try {
-        const nextBootstrap = await window.tiyaDesktop.desktop.bootstrap();
+        const nextBootstrap = await bridge.desktop.bootstrap();
         if (cancelled) {
           return;
         }
@@ -381,7 +462,7 @@ function useDesktopRuntime(setNotice: Dispatch<SetStateAction<Notice | null>>) {
           return;
         }
         const message = error instanceof Error ? error.message : String(error);
-        setFatalError(message);
+        recordRuntimeError(message);
         setNotice({
           tone: "danger",
           text: `Desktop bootstrap failed: ${message}`
@@ -452,12 +533,13 @@ function useDesktopRuntime(setNotice: Dispatch<SetStateAction<Notice | null>>) {
     setBusyAction(action);
     await waitForNextPaint();
     try {
+      const bridge = requireDesktopBridge();
       const result: ServiceActionResult =
         action === "start"
-          ? await window.tiyaDesktop.service.start()
+          ? await bridge.service.start()
           : action === "stop"
-            ? await window.tiyaDesktop.service.stop()
-            : await window.tiyaDesktop.service.restart();
+            ? await bridge.service.stop()
+            : await bridge.service.restart();
       setStatus(result.status);
       setNotice({
         tone: didServiceActionSucceed(action, result) ? "success" : "danger",
@@ -479,8 +561,9 @@ function useDesktopRuntime(setNotice: Dispatch<SetStateAction<Notice | null>>) {
     setBusyAction("validate");
     await waitForNextPaint();
     try {
+      const bridge = requireDesktopBridge();
       const payload = buildPayload(draftEnv, config);
-      const result = await window.tiyaDesktop.config.validate(payload);
+      const result = await bridge.config.validate(payload);
       setValidation(result);
       return result;
     } catch (error) {
@@ -498,6 +581,7 @@ function useDesktopRuntime(setNotice: Dispatch<SetStateAction<Notice | null>>) {
     setBusyAction(`save-${origin}`);
     await waitForNextPaint();
     try {
+      const bridge = requireDesktopBridge();
       if (!config) {
         setNotice({
           tone: "danger",
@@ -515,7 +599,7 @@ function useDesktopRuntime(setNotice: Dispatch<SetStateAction<Notice | null>>) {
         return false;
       }
 
-      const result = await window.tiyaDesktop.config.validate(buildPayload(draftEnv, config));
+      const result = await bridge.config.validate(buildPayload(draftEnv, config));
       setValidation(result);
       if (!result.ok) {
         setNotice({
@@ -526,13 +610,13 @@ function useDesktopRuntime(setNotice: Dispatch<SetStateAction<Notice | null>>) {
       }
 
       if (tokenDraft.trim()) {
-        await window.tiyaDesktop.config.setSecret(tokenDraft.trim());
+        await bridge.config.setSecret(tokenDraft.trim());
         setTokenDraft("");
       }
 
       const [savedConfig, nextStatus] = await Promise.all([
-        window.tiyaDesktop.config.set(buildPayload(result.normalized.env, config)),
-        window.tiyaDesktop.service.status()
+        bridge.config.set(buildPayload(result.normalized.env, config)),
+        bridge.service.status()
       ]);
       startTransition(() => {
         setConfig(savedConfig);
@@ -559,10 +643,11 @@ function useDesktopRuntime(setNotice: Dispatch<SetStateAction<Notice | null>>) {
     setBusyAction("clear-secret");
     await waitForNextPaint();
     try {
-      await window.tiyaDesktop.config.clearSecret();
+      const bridge = requireDesktopBridge();
+      await bridge.config.clearSecret();
       const [nextConfig, nextStatus] = await Promise.all([
-        window.tiyaDesktop.config.get(),
-        window.tiyaDesktop.service.status()
+        bridge.config.get(),
+        bridge.service.status()
       ]);
       startTransition(() => {
         setConfig(nextConfig);
@@ -616,8 +701,9 @@ function useSessionsView(setNotice: Dispatch<SetStateAction<Notice | null>>) {
     setBusyAction("sessions");
     await waitForNextPaint();
     try {
+      const bridge = requireDesktopBridge();
       const telegramUserId = parseOptionalUserId(sessionUserIdInput);
-      const listing = await window.tiyaDesktop.sessions.list({
+      const listing = await bridge.sessions.list({
         provider: sessionProvider,
         limit: 24,
         telegramUserId
@@ -649,7 +735,8 @@ function useSessionsView(setNotice: Dispatch<SetStateAction<Notice | null>>) {
       await waitForNextPaint();
     }
     try {
-      const history = await window.tiyaDesktop.sessions.history({
+      const bridge = requireDesktopBridge();
+      const history = await bridge.sessions.history({
         provider: session.provider,
         sessionId: session.sessionId,
         limit: 80
@@ -746,7 +833,8 @@ function useDiagnosticsView(
       await waitForNextPaint();
     }
     try {
-      const nextDiagnostics = await window.tiyaDesktop.diagnostics.report();
+      const bridge = requireDesktopBridge();
+      const nextDiagnostics = await bridge.diagnostics.report();
       startTransition(() => {
         setDiagnostics(nextDiagnostics);
         setHasLoaded(true);
@@ -818,7 +906,8 @@ function useDiagnosticsView(
     setBusyAction("export");
     await waitForNextPaint();
     try {
-      const result = await window.tiyaDesktop.diagnostics.export();
+      const bridge = requireDesktopBridge();
+      const result = await bridge.diagnostics.export();
       setLastExportPath(result.path);
       setNotice({
         tone: "success",
@@ -853,6 +942,7 @@ export default function App() {
   const [view, setView] = useState<ViewKey>("overview");
   const [diagnosticsTab, setDiagnosticsTab] = useState<DiagnosticsTab>("logs");
   const [activeTheme, setActiveTheme] = useState<ThemeKey>(() => resolveStoredTheme());
+  const [workspaceQuery, setWorkspaceQuery] = useState("");
   const [notice, setNotice] = useState<Notice | null>(null);
   const [wizardStepIndex, setWizardStepIndex] = useState(0);
   const logsActive = view === "logs" && diagnosticsTab === "logs";
@@ -913,11 +1003,102 @@ export default function App() {
 
   const busyAction = runtimeBusyAction ?? sessionsBusyAction ?? diagnosticsBusyAction;
   const deferredLogs = useDeferredValue(logLines);
+  const deferredWorkspaceQuery = useDeferredValue(workspaceQuery.trim().toLowerCase());
   const requiresSetup = Boolean(config?.secrets && (!config.secrets.telegramToken.present || status?.phase === "unconfigured"));
   const showWizard = requiresSetup;
   const currentView = navItems.find((item) => item.key === view) ?? navItems[0];
+  const primaryNavItems = navItems.filter((item) => item.section === "core");
+  const labNavItems = navItems.filter((item) => item.section === "lab");
   const activeThemeSample = themeSamples.find((sample) => sample.key === activeTheme) ?? themeSamples[2];
   const reducedEffects = (config?.env.TIYA_DESKTOP_GPU_MODE ?? bootstrap?.config?.env.TIYA_DESKTOP_GPU_MODE ?? "disabled") !== "enabled";
+  const availableRunnerCount = countReadyRunners(status);
+  const runnerHealthItems = status
+    ? [
+        { name: "Codex", bin: status.runnerHealth.codex.bin, available: status.runnerHealth.codex.available },
+        { name: "Claude", bin: status.runnerHealth.claude.bin, available: status.runnerHealth.claude.available }
+      ]
+    : [];
+  const runtimePathItems = status
+    ? [
+        status.runtimePaths.envPath,
+        status.runtimePaths.socketPath,
+        status.runtimePaths.runtimeRoot,
+        status.runtimePaths.storagePath ?? "",
+        status.runtimePaths.logPath ?? status.runtimePaths.supervisorLogPath
+      ].filter(Boolean)
+    : [];
+  const filteredRuntimePathItems = runtimePathItems.filter((item) => matchesWorkspaceQuery(deferredWorkspaceQuery, item));
+  const filteredRecentActivity = (status?.recentActivity ?? []).filter((item) =>
+    matchesWorkspaceQuery(
+      deferredWorkspaceQuery,
+      item.telegramUserId,
+      item.provider,
+      item.activeSessionId,
+      item.activeCwd,
+      item.activeRunId,
+      item.lastSessionIds.join(" "),
+      formatDate(item.updatedAt)
+    )
+  );
+  const filteredBlockingIssues = (status?.blockingIssues ?? []).filter((issue) =>
+    matchesWorkspaceQuery(deferredWorkspaceQuery, issue.code, issue.message)
+  );
+  const filteredWarnings = (status?.warnings ?? []).filter((warning) => matchesWorkspaceQuery(deferredWorkspaceQuery, warning));
+  const filteredBasicFields = basicFields.filter((field) =>
+    matchesWorkspaceQuery(deferredWorkspaceQuery, field.key, field.label, field.hint, field.placeholder, field.options?.map((option) => option.label).join(" "))
+  );
+  const filteredAdvancedFields = advancedFields.filter((field) =>
+    matchesWorkspaceQuery(deferredWorkspaceQuery, field.key, field.label, field.hint, field.placeholder, field.options?.map((option) => option.label).join(" "))
+  );
+  const filteredSessions = (sessionList?.items ?? []).filter((item) =>
+    matchesWorkspaceQuery(
+      deferredWorkspaceQuery,
+      item.provider,
+      item.title,
+      item.sessionId,
+      item.cwd,
+      item.sourcePath,
+      formatDate(item.timestamp),
+      item.isActiveForUser ? "active" : ""
+    )
+  );
+  const filteredSessionHistoryMessages = (sessionHistory?.messages ?? []).filter((message) =>
+    matchesWorkspaceQuery(deferredWorkspaceQuery, message.role, message.content)
+  );
+  const filteredLogs = deferredLogs.filter((line) => matchesWorkspaceQuery(deferredWorkspaceQuery, line));
+  const filteredDiagnosticActions = (diagnostics?.recommendedActions ?? []).filter((action) =>
+    matchesWorkspaceQuery(deferredWorkspaceQuery, action)
+  );
+  const filteredDiagnosticErrors = (diagnostics?.recentErrors ?? []).filter((line) => matchesWorkspaceQuery(deferredWorkspaceQuery, line));
+  const filteredDiagnosticPaths = [
+    diagnostics?.envPath ?? "",
+    diagnostics?.runtimeRoot ?? "",
+    diagnostics?.socketPath ?? "",
+    diagnostics?.storagePath ?? "",
+    diagnostics?.logPath ?? ""
+  ].filter((item) => item && matchesWorkspaceQuery(deferredWorkspaceQuery, item));
+  const filteredThemeSamples = themeSamples.filter((sample) =>
+    matchesWorkspaceQuery(
+      deferredWorkspaceQuery,
+      sample.name,
+      sample.eyebrow,
+      sample.summary,
+      sample.recommendation,
+      sample.notes.join(" ")
+    )
+  );
+  const latestActivity = [...(status?.recentActivity ?? [])].sort((left, right) => right.updatedAt - left.updatedAt)[0] ?? null;
+  const activeSearchText = workspaceQuery.trim();
+  const shellStatusLabel = showWizard ? "Setup Required" : humanizePhase(status?.phase);
+  const shellStatusCopy = showWizard
+    ? "Finish the guided setup before using the rest of the desktop console."
+    : status?.blockingIssues[0]?.message ?? initState.initError ?? "Desktop-managed runtime, supervisor, and diagnostics.";
+  const workspaceIntro =
+    view === "themes"
+      ? "Compare three visual directions on the same desktop skeleton before committing to a full theme refactor."
+      : showWizard
+      ? "The shell is visible for context, but configuration is guided through a dedicated setup modal."
+      : "Observe the supervisor, adjust runtime policy, inspect recent sessions, and export diagnostics without leaving the desktop shell.";
 
   useEffect(() => {
     document.documentElement.dataset.theme = activeTheme;
@@ -935,7 +1116,11 @@ export default function App() {
   }, [handleDiagnosticsEvent, handleRuntimeEvent, invalidateDiagnostics]);
 
   useEffect(() => {
-    const unsubscribe = window.tiyaDesktop.events.subscribe((event) => {
+    const bridge = getDesktopBridge();
+    if (!bridge) {
+      return;
+    }
+    const unsubscribe = bridge.events.subscribe((event) => {
       eventHandlerRef.current(event);
     });
     return () => {
@@ -998,22 +1183,39 @@ export default function App() {
   }
 
   async function pickDirectory(fieldKey: string): Promise<void> {
-    const selected = await window.tiyaDesktop.dialog.pickDirectory();
-    if (!selected) {
-      return;
+    try {
+      const bridge = requireDesktopBridge();
+      const selected = await bridge.dialog.pickDirectory();
+      if (!selected) {
+        return;
+      }
+      setDraftEnv((current) => ({
+        ...current,
+        [fieldKey]: selected
+      }));
+    } catch (error) {
+      setNotice({
+        tone: "danger",
+        text: error instanceof Error ? error.message : String(error)
+      });
     }
-    setDraftEnv((current) => ({
-      ...current,
-      [fieldKey]: selected
-    }));
   }
 
   async function openPath(targetPath: string): Promise<void> {
-    const error = await window.tiyaDesktop.shell.openPath(targetPath);
-    if (error) {
+    try {
+      const bridge = requireDesktopBridge();
+      const error = await bridge.shell.openPath(targetPath);
+      if (!error) {
+        return;
+      }
       setNotice({
         tone: "danger",
         text: error
+      });
+    } catch (error) {
+      setNotice({
+        tone: "danger",
+        text: error instanceof Error ? error.message : String(error)
       });
     }
   }
@@ -1032,38 +1234,84 @@ export default function App() {
       );
     }
 
-    const runtime = status.runtimePaths;
+    const issueCount = status.blockingIssues.length + status.warnings.length;
+    const statusLabel = humanizePhase(status.phase);
+    const latestActivityLabel = latestActivity ? `${latestActivity.provider} · ${formatDate(latestActivity.updatedAt)}` : "No operator activity yet";
+    const querySummary = activeSearchText ? `Filtered by "${activeSearchText}"` : "Live desktop-managed runtime and local automation paths";
 
     return (
-      <section className="view-grid">
-        <Card title="Service Health" eyebrow="Current phase" accent={status.phase}>
-          <div className="metric-strip">
-            <Metric label="Phase" value={humanizePhase(status.phase)} tone={status.phase} />
+      <section className="view-grid view-grid-overview">
+        <Card title="Runtime Command Deck" eyebrow="Current phase" accent={status.phase} className="card-span-2 card-hero">
+          <div className="overview-hero">
+            <div className="overview-hero-copy">
+              <span className={`phase-pill phase-pill-${status.phase}`}>{statusLabel}</span>
+              <h4 className="hero-title">A calmer control board for the Telegram-facing tiya runtime.</h4>
+              <p className="hero-copy">
+                Launch the worker, inspect runner readiness, and move through sessions or diagnostics from a single editorial-style dashboard.
+              </p>
+              <p className="hero-meta">{querySummary}</p>
+              <div className="button-row">
+                <ActionButton label="Start" onClick={() => void runServiceAction("start")} busy={busyAction === "start"} />
+                <ActionButton label="Stop" onClick={() => void runServiceAction("stop")} busy={busyAction === "stop"} subtle />
+                <ActionButton label="Restart" onClick={() => void runServiceAction("restart")} busy={busyAction === "restart"} subtle />
+              </div>
+            </div>
+
+            <div className="overview-orbit">
+              <div className="overview-orbit-core">
+                <span className="overview-orbit-kicker">Ready runners</span>
+                <strong>{availableRunnerCount}/2</strong>
+                <span>{issueCount ? `${issueCount} issue lanes need attention` : "No blockers reported"}</span>
+              </div>
+              <div className="overview-orbit-grid">
+                <Metric label="Desktop PID" value={status.desktopPid ? String(status.desktopPid) : "Unknown"} />
+                <Metric label="Worker PID" value={status.workerPid ? String(status.workerPid) : "Not running"} />
+                <Metric label="Ready At" value={formatDate(status.readyAt)} />
+                <Metric label="Launch ID" value={status.launchId ?? "Not started"} />
+              </div>
+            </div>
+          </div>
+        </Card>
+
+        <Card title="Active View" eyebrow="Workspace state" className="card-stat">
+          <div className="stat-block">
+            <strong>{currentView.label}</strong>
+            <span>{statusLabel}</span>
+          </div>
+          <p className="card-caption">The shell stays live while you pivot between setup, sessions, and diagnostics.</p>
+        </Card>
+
+        <Card title="Recent Traffic" eyebrow="Operator pulse" className="card-stat">
+          <div className="stat-block">
+            <strong>{status.recentActivity.length}</strong>
+            <span>{latestActivityLabel}</span>
+          </div>
+          <p className="card-caption">Search narrows the table below by user, provider, session, and working directory.</p>
+        </Card>
+
+        <Card title="Service Health" eyebrow="Process map" className="card-span-2">
+          <div className="metric-strip metric-strip-wide">
+            <Metric label="Phase" value={statusLabel} tone={status.phase} />
             <Metric label="Desktop PID" value={status.desktopPid ? String(status.desktopPid) : "Unknown"} />
             <Metric label="Supervisor PID" value={String(status.supervisorPid)} />
             <Metric label="Worker PID" value={status.workerPid ? String(status.workerPid) : "Not running"} />
-            <Metric label="Launch ID" value={status.launchId ?? "Not started"} />
             <Metric label="Started At" value={formatDate(status.workerStartedAt)} />
             <Metric label="Ready At" value={formatDate(status.readyAt)} />
-          </div>
-          <div className="button-row">
-            <ActionButton label="Start" onClick={() => void runServiceAction("start")} busy={busyAction === "start"} />
-            <ActionButton label="Stop" onClick={() => void runServiceAction("stop")} busy={busyAction === "stop"} subtle />
-            <ActionButton label="Restart" onClick={() => void runServiceAction("restart")} busy={busyAction === "restart"} subtle />
           </div>
         </Card>
 
         <Card title="Runner Availability" eyebrow="Local CLIs">
           <div className="runner-grid">
-            <RunnerBadge name="Codex" bin={status.runnerHealth.codex.bin} available={status.runnerHealth.codex.available} />
-            <RunnerBadge name="Claude" bin={status.runnerHealth.claude.bin} available={status.runnerHealth.claude.available} />
+            {runnerHealthItems.map((item) => (
+              <RunnerBadge key={item.name} name={item.name} bin={item.bin} available={item.available} />
+            ))}
           </div>
         </Card>
 
         <Card title="Blocking Issues" eyebrow="Operator focus">
-          {status.blockingIssues.length ? (
+          {filteredBlockingIssues.length ? (
             <div className="issue-list">
-              {status.blockingIssues.map((issue) => (
+              {filteredBlockingIssues.map((issue) => (
                 <div key={`${issue.code}:${issue.message}`} className="issue-item issue-item-danger">
                   <strong>{issue.code}</strong>
                   <span>{issue.message}</span>
@@ -1071,11 +1319,11 @@ export default function App() {
               ))}
             </div>
           ) : (
-            <EmptyInline copy="No blocking issues reported by the supervisor." />
+            <EmptyInline copy={activeSearchText ? "No blocking issues matched the current search." : "No blocking issues reported by the supervisor."} />
           )}
-          {status.warnings.length ? (
+          {filteredWarnings.length ? (
             <div className="issue-list">
-              {status.warnings.map((warning) => (
+              {filteredWarnings.map((warning) => (
                 <div key={warning} className="issue-item issue-item-warning">
                   <strong>warning</strong>
                   <span>{warning}</span>
@@ -1086,20 +1334,15 @@ export default function App() {
         </Card>
 
         <Card title="Runtime Map" eyebrow="Desktop-managed paths">
-          <PathList
-            items={[
-              runtime.envPath,
-              runtime.socketPath,
-              runtime.runtimeRoot,
-              runtime.storagePath ?? "",
-              runtime.logPath ?? runtime.supervisorLogPath
-            ].filter(Boolean)}
-            onOpen={openPath}
-          />
+          {filteredRuntimePathItems.length ? (
+            <PathList items={filteredRuntimePathItems} onOpen={openPath} />
+          ) : (
+            <EmptyInline copy="No runtime paths matched the current search." />
+          )}
         </Card>
 
-        <Card title="Recent Activity" eyebrow="Per Telegram user">
-          {status.recentActivity.length ? (
+        <Card title="Recent Activity" eyebrow="Per Telegram user" className="card-span-full">
+          {filteredRecentActivity.length ? (
             <div className="activity-table">
               <div className="activity-row activity-row-head">
                 <span>User</span>
@@ -1108,7 +1351,7 @@ export default function App() {
                 <span>CWD</span>
                 <span>Updated</span>
               </div>
-              {status.recentActivity.map((item) => (
+              {filteredRecentActivity.map((item) => (
                 <div key={`${item.telegramUserId}:${item.provider}`} className="activity-row">
                   <span>{item.telegramUserId}</span>
                   <span>{item.provider}</span>
@@ -1119,7 +1362,13 @@ export default function App() {
               ))}
             </div>
           ) : (
-            <EmptyInline copy="No stored activity yet. Start the worker and let Telegram traffic arrive." />
+            <EmptyInline
+              copy={
+                activeSearchText
+                  ? "No recent activity rows matched the current search."
+                  : "No stored activity yet. Start the worker and let Telegram traffic arrive."
+              }
+            />
           )}
         </Card>
       </section>
@@ -1132,15 +1381,39 @@ export default function App() {
     }
 
     const secretBackendGuidance = resolveSecretBackendGuidance(config.secrets.telegramToken);
+    const defaultProvider = draftEnv.DEFAULT_PROVIDER || "codex";
+    const allowedUsers = draftEnv.ALLOWED_TELEGRAM_USER_IDS?.trim() || "Unset";
 
     return (
-      <section className="view-grid">
+      <section className="view-grid view-grid-config">
+        <Card title="Configuration Posture" eyebrow="Operator defaults" className="card-span-2">
+          <div className="metric-strip">
+            <Metric label="Default Provider" value={defaultProvider} />
+            <Metric label="Default CWD" value={draftEnv.DEFAULT_CWD || "Unset"} />
+            <Metric label="Allowed Users" value={allowedUsers} />
+            <Metric label="Secret State" value={config.secrets.telegramToken.present ? "Configured" : "Missing"} />
+          </div>
+          <p className="card-caption">
+            {activeSearchText
+              ? `Showing fields matching "${activeSearchText}" across labels, keys, hints, and select options.`
+              : "Use the search field above to narrow both configuration columns before validating or saving."}
+          </p>
+        </Card>
+
         <Card title="Basic Configuration" eyebrow="Operator defaults">
-          <FieldGrid fields={basicFields} values={draftEnv} onChange={setDraftEnv} onPickDirectory={pickDirectory} />
+          {filteredBasicFields.length ? (
+            <FieldGrid fields={filteredBasicFields} values={draftEnv} onChange={setDraftEnv} onPickDirectory={pickDirectory} />
+          ) : (
+            <EmptyInline copy="No basic configuration fields matched the current search." />
+          )}
         </Card>
 
         <Card title="Advanced Configuration" eyebrow="Runtime behavior">
-          <FieldGrid fields={advancedFields} values={draftEnv} onChange={setDraftEnv} onPickDirectory={pickDirectory} />
+          {filteredAdvancedFields.length ? (
+            <FieldGrid fields={filteredAdvancedFields} values={draftEnv} onChange={setDraftEnv} onPickDirectory={pickDirectory} />
+          ) : (
+            <EmptyInline copy="No advanced configuration fields matched the current search." />
+          )}
         </Card>
 
         <Card title="Secrets" eyebrow="Stored outside tiya.env">
@@ -1201,9 +1474,19 @@ export default function App() {
   }
 
   function renderSessions(): JSX.Element {
+    const historyMatchesMeta =
+      !activeSearchText ||
+      matchesWorkspaceQuery(
+        deferredWorkspaceQuery,
+        sessionHistory?.meta?.title,
+        sessionHistory?.meta?.cwd,
+        sessionHistory?.meta?.sessionId,
+        sessionHistory?.meta?.sourcePath
+      );
+
     return (
       <section className="sessions-layout">
-        <Card title="Session Filters" eyebrow="Provider + Telegram user">
+        <Card title="Session Filters" eyebrow="Provider + Telegram user" className="card-span-full">
           <div className="filter-row">
             <label className="field">
               <span className="field-label">Provider</span>
@@ -1225,13 +1508,18 @@ export default function App() {
               <ActionButton label="Refresh" onClick={() => void loadSessions()} busy={busyAction === "sessions"} />
             </div>
           </div>
+          <p className="card-caption">
+            {activeSearchText
+              ? `Showing ${filteredSessions.length} matching sessions and ${filteredSessionHistoryMessages.length} matching preview messages.`
+              : "The search field above scans session title, ID, path, timestamp, and preview message content."}
+          </p>
         </Card>
 
         <div className="sessions-columns">
           <Card title="Recent Sessions" eyebrow="Local archives">
-            {sessionList?.items.length ? (
+            {filteredSessions.length ? (
               <div className="session-list">
-                {sessionList.items.map((item) => (
+                {filteredSessions.map((item) => (
                   <button
                     key={item.sessionId}
                     className={`session-item ${selectedSessionId === item.sessionId ? "session-item-active" : ""}`}
@@ -1248,12 +1536,12 @@ export default function App() {
                 ))}
               </div>
             ) : (
-              <EmptyInline copy="No sessions matched the current filter." />
+              <EmptyInline copy={activeSearchText ? "No sessions matched the current provider, user, and search filter." : "No sessions matched the current filter."} />
             )}
           </Card>
 
           <Card title="History Preview" eyebrow="Selected conversation">
-            {sessionHistory?.meta ? (
+            {sessionHistory?.meta && (historyMatchesMeta || filteredSessionHistoryMessages.length) ? (
               <div className="history-panel">
                 <div className="history-meta">
                   <strong>{sessionHistory.meta.title}</strong>
@@ -1268,16 +1556,26 @@ export default function App() {
                   </div>
                 </div>
                 <div className="history-messages">
-                  {sessionHistory.messages.map((message, index) => (
-                    <article key={`${message.role}:${index}`} className={`history-message history-message-${message.role}`}>
-                      <strong>{message.role}</strong>
-                      <p>{message.content}</p>
-                    </article>
-                  ))}
+                  {filteredSessionHistoryMessages.length ? (
+                    filteredSessionHistoryMessages.map((message, index) => (
+                      <article key={`${message.role}:${index}`} className={`history-message history-message-${message.role}`}>
+                        <strong>{message.role}</strong>
+                        <p>{message.content}</p>
+                      </article>
+                    ))
+                  ) : (
+                    <EmptyInline copy="The selected session metadata matches, but no individual messages matched the current search." />
+                  )}
                 </div>
               </div>
             ) : (
-              <EmptyInline copy="Pick a recent session to inspect its history preview." />
+              <EmptyInline
+                copy={
+                  activeSearchText
+                    ? "No selected session preview matched the current search."
+                    : "Pick a recent session to inspect its history preview."
+                }
+              />
             )}
           </Card>
         </div>
@@ -1287,8 +1585,8 @@ export default function App() {
 
   function renderLogsAndDiagnostics(): JSX.Element {
     return (
-      <section className="view-grid">
-        <Card title="Control Surface" eyebrow="Logs + diagnostics">
+      <section className="view-grid view-grid-logs">
+        <Card title="Control Surface" eyebrow="Logs + diagnostics" className="card-span-2">
           <div className="tab-row">
             <button
               className={`tab-button ${diagnosticsTab === "logs" ? "tab-button-active" : ""}`}
@@ -1306,40 +1604,57 @@ export default function App() {
 
           {diagnosticsTab === "logs" ? (
             <div className="log-console">
-              {deferredLogs.length ? deferredLogs.map((line, index) => <pre key={`${index}:${line}`}>{line}</pre>) : <EmptyInline copy="Waiting for supervisor log events." />}
+              {filteredLogs.length ? filteredLogs.map((line, index) => <pre key={`${index}:${line}`}>{line}</pre>) : <EmptyInline copy={activeSearchText ? "No log lines matched the current search." : "Waiting for supervisor log events."} />}
             </div>
           ) : diagnostics ? (
             <div className="diagnostics-grid">
-              <div className="issue-list">
-                {diagnostics.recommendedActions.map((action) => (
-                  <div key={action} className="issue-item">
-                    <strong>action</strong>
-                    <span>{action}</span>
-                  </div>
-                ))}
-              </div>
-              <PathList
-                items={[
-                  diagnostics.envPath,
-                  diagnostics.runtimeRoot,
-                  diagnostics.socketPath,
-                  diagnostics.storagePath ?? "",
-                  diagnostics.logPath
-                ].filter(Boolean)}
-                onOpen={openPath}
-              />
+              {filteredDiagnosticActions.length ? (
+                <div className="issue-list">
+                  {filteredDiagnosticActions.map((action) => (
+                    <div key={action} className="issue-item">
+                      <strong>action</strong>
+                      <span>{action}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <EmptyInline copy={activeSearchText ? "No recommended actions matched the current search." : "No recommended actions reported."} />
+              )}
+              {filteredDiagnosticPaths.length ? (
+                <PathList items={filteredDiagnosticPaths} onOpen={openPath} />
+              ) : (
+                <EmptyInline copy="No diagnostics paths matched the current search." />
+              )}
               <div className="button-row">
                 <ActionButton label="Refresh Diagnostics" onClick={() => void refreshDiagnostics()} busy={busyAction === "diagnostics"} subtle />
                 <ActionButton label="Export Bundle" onClick={() => void exportDiagnostics()} busy={busyAction === "export"} />
               </div>
               {lastExportPath ? <p className="field-hint">Last export: {lastExportPath}</p> : null}
               <div className="log-console">
-                {diagnostics.recentErrors.length ? diagnostics.recentErrors.map((line, index) => <pre key={`${index}:${line}`}>{line}</pre>) : <EmptyInline copy="No recent error excerpts captured." />}
+                {filteredDiagnosticErrors.length ? (
+                  filteredDiagnosticErrors.map((line, index) => <pre key={`${index}:${line}`}>{line}</pre>)
+                ) : (
+                  <EmptyInline copy={activeSearchText ? "No recent errors matched the current search." : "No recent error excerpts captured."} />
+                )}
               </div>
             </div>
           ) : (
             <EmptyInline copy="Diagnostics report is not available yet." />
           )}
+        </Card>
+
+        <Card title="Diagnostics Snapshot" eyebrow="Quick counts">
+          <div className="metric-strip">
+            <Metric label="Log Lines" value={String(logLines.length)} />
+            <Metric label="Recent Errors" value={String(diagnostics?.recentErrors.length ?? 0)} />
+            <Metric label="Actions" value={String(diagnostics?.recommendedActions.length ?? 0)} />
+            <Metric label="Lock Status" value={diagnostics?.lockStatus.conflict ? "Conflict" : "Clear"} />
+          </div>
+          <p className="card-caption">
+            {activeSearchText
+              ? `Diagnostics search is active across logs, actions, paths, and recent errors for "${activeSearchText}".`
+              : "Use this board when the local supervisor needs triage, bundle export, or filesystem verification."}
+          </p>
         </Card>
       </section>
     );
@@ -1381,10 +1696,15 @@ export default function App() {
             Compare the three directions on the same shell, then activate the one you want. Theme changes apply instantly and persist
             locally on this desktop.
           </p>
+          <p className="card-caption">
+            {activeSearchText
+              ? `Showing theme notes and variants matching "${activeSearchText}".`
+              : "The active redesign uses a softer moss-and-ivory board, but the study view still lets you compare alternate moods."}
+          </p>
         </Card>
 
         <div className="theme-lab-grid">
-          {themeSamples.map((sample) => (
+          {filteredThemeSamples.map((sample) => (
             <article key={sample.key} className="theme-preview-card" style={themePreviewStyle(sample)}>
               <header className="theme-preview-meta">
                 <div>
@@ -1490,6 +1810,7 @@ export default function App() {
             </article>
           ))}
         </div>
+        {filteredThemeSamples.length ? null : <EmptyInline copy="No theme directions matched the current search." />}
       </section>
     );
   }
@@ -1634,6 +1955,20 @@ export default function App() {
     );
   }
 
+  function navBadgeValue(item: ViewKey): string | null {
+    if (item === "sessions" && sessionList?.items.length) {
+      return String(sessionList.items.length);
+    }
+    if (item === "logs" && status) {
+      const issueCount = status.blockingIssues.length + status.warnings.length;
+      return issueCount ? String(issueCount) : null;
+    }
+    if (item === "themes") {
+      return "Lab";
+    }
+    return null;
+  }
+
   return (
     <div className={`app-shell ${showWizard ? "app-shell-setup-lock" : ""} ${reducedEffects ? "app-shell-reduced-effects" : ""}`}>
       <div className="ambient ambient-a" />
@@ -1641,37 +1976,75 @@ export default function App() {
 
       <aside className="sidebar">
         <div className="brand-lockup">
-          <span className="brand-kicker">tiya desktop</span>
-          <h1>Signal Desk</h1>
-          <p>Local operations console for the Telegram-facing runtime. Keep desktop open to keep the worker running.</p>
+          <div className="brand-mark" aria-hidden="true">
+            <span />
+            <span />
+          </div>
+          <div className="brand-copy">
+            <span className="brand-kicker">tiya desktop</span>
+            <h1>Signal Desk</h1>
+            <p>Local operations console for the Telegram-facing runtime. Keep desktop open to keep the worker running.</p>
+          </div>
         </div>
 
         <div className="status-card">
           <span className={`phase-pill phase-pill-${showWizard ? "unconfigured" : status?.phase ?? "stopped"}`}>
-            {showWizard ? "Setup Required" : humanizePhase(status?.phase)}
+            {shellStatusLabel}
           </span>
-          <p>
-            {showWizard
-              ? "Finish the guided setup before using the rest of the desktop console."
-              : status?.blockingIssues[0]?.message ?? initState.initError ?? "Desktop-managed runtime, supervisor, and diagnostics."}
-          </p>
+          <p>{shellStatusCopy}</p>
+          <div className="status-card-meta">
+            <span>{availableRunnerCount}/2 runners ready</span>
+            <span>{status?.recentActivity.length ?? 0} activity lanes</span>
+          </div>
         </div>
 
-        <nav className="nav-stack">
-          {navItems.map((item) => (
-            <button
-              key={item.key}
-              className={`nav-item ${item.key === view ? "nav-item-active" : ""}`}
-              onClick={() => setView(item.key)}
-              disabled={showWizard}
-            >
-              <span>{item.eyebrow}</span>
-              <strong>{item.label}</strong>
-            </button>
-          ))}
-        </nav>
+        <div className="sidebar-section">
+          <span className="sidebar-section-label">Menu</span>
+          <nav className="nav-stack">
+            {primaryNavItems.map((item) => (
+              <button
+                key={item.key}
+                className={`nav-item ${item.key === view ? "nav-item-active" : ""}`}
+                onClick={() => setView(item.key)}
+                disabled={showWizard}
+              >
+                <span className="nav-item-icon">
+                  <NavIcon kind={item.icon} />
+                </span>
+                <span className="nav-item-copy">
+                  <span>{item.eyebrow}</span>
+                  <strong>{item.label}</strong>
+                </span>
+                {navBadgeValue(item.key) ? <span className="nav-item-count">{navBadgeValue(item.key)}</span> : null}
+              </button>
+            ))}
+          </nav>
+        </div>
 
-        <Card title="Desktop Runtime" eyebrow="Pinned paths" compact>
+        <div className="sidebar-section">
+          <span className="sidebar-section-label">Lab</span>
+          <nav className="nav-stack nav-stack-secondary">
+            {labNavItems.map((item) => (
+              <button
+                key={item.key}
+                className={`nav-item ${item.key === view ? "nav-item-active" : ""}`}
+                onClick={() => setView(item.key)}
+                disabled={showWizard}
+              >
+                <span className="nav-item-icon">
+                  <NavIcon kind={item.icon} />
+                </span>
+                <span className="nav-item-copy">
+                  <span>{item.eyebrow}</span>
+                  <strong>{item.label}</strong>
+                </span>
+                {navBadgeValue(item.key) ? <span className="nav-item-count">{navBadgeValue(item.key)}</span> : null}
+              </button>
+            ))}
+          </nav>
+        </div>
+
+        <Card title="Desktop Runtime" eyebrow="Pinned paths" compact className="sidebar-runtime-card">
           {bootstrap?.paths ? (
             <PathList items={[bootstrap.paths.envFile, bootstrap.paths.runtimeRoot, bootstrap.paths.socketPath]} onOpen={openPath} compact />
           ) : (
@@ -1681,24 +2054,50 @@ export default function App() {
       </aside>
 
       <main className="workspace">
+        <header className="workspace-topbar">
+          <label className="workspace-search">
+            <SearchIcon />
+            <input
+              className="workspace-search-input"
+              value={workspaceQuery}
+              onChange={(event) => setWorkspaceQuery(event.target.value)}
+              placeholder={buildWorkspaceSearchPlaceholder(view)}
+            />
+            {workspaceQuery ? (
+              <button className="workspace-search-clear" type="button" onClick={() => setWorkspaceQuery("")}>
+                Clear
+              </button>
+            ) : (
+              <span className="workspace-search-hint">Live filter</span>
+            )}
+          </label>
+
+          <div className="workspace-topbar-actions">
+            <span className="workspace-chip">Phase · {shellStatusLabel}</span>
+            <span className="workspace-chip">Runners · {availableRunnerCount}/2</span>
+            <ThemeSwitcher activeTheme={activeTheme} onSelect={setActiveTheme} onOpenThemes={() => setView("themes")} />
+            <div className="workspace-operator">
+              <div className="workspace-operator-avatar">TD</div>
+              <div className="workspace-operator-copy">
+                <strong>Desktop Operator</strong>
+                <span>{status?.launchId ? `Launch ${status.launchId.slice(0, 8)}` : activeThemeSample.name}</span>
+              </div>
+            </div>
+          </div>
+        </header>
+
         <header className="workspace-header">
-          <div>
-            <span className="section-kicker">{view === "themes" ? "Theme study" : showWizard ? "Setup required" : humanizePhase(status?.phase)}</span>
+          <div className="workspace-header-copy">
+            <span className="section-kicker">{view === "themes" ? "Theme study" : shellStatusLabel}</span>
             <h2>{currentView.label}</h2>
-            <p>
-              {view === "themes"
-                ? "Compare three visual directions on the same desktop skeleton before committing to a full theme refactor."
-                : showWizard
-                ? "The shell is visible for context, but configuration is guided through a dedicated setup modal."
-                : "Observe the supervisor, adjust runtime policy, inspect recent sessions, and export diagnostics without leaving the desktop shell."}
-            </p>
+            <p>{workspaceIntro}</p>
+            {activeSearchText ? <span className="workspace-query">Filtering current view by "{activeSearchText}"</span> : null}
           </div>
           <div className="button-row">
             {view === "themes" ? (
               <ThemeSwitcher activeTheme={activeTheme} onSelect={setActiveTheme} />
             ) : (
               <>
-                <ThemeSwitcher activeTheme={activeTheme} onSelect={setActiveTheme} onOpenThemes={() => setView("themes")} />
                 <ActionButton label="Refresh" onClick={() => void hydrate()} busy={busyAction === "hydrate"} subtle />
                 <ActionButton label="Start" onClick={() => void runServiceAction("start")} busy={busyAction === "start"} disabled={showWizard} />
                 <ActionButton label="Restart" onClick={() => void runServiceAction("restart")} busy={busyAction === "restart"} subtle disabled={showWizard} />
@@ -1717,15 +2116,74 @@ export default function App() {
   );
 }
 
+function SearchIcon(): JSX.Element {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M16.2 16.2 21 21" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.8" />
+    </svg>
+  );
+}
+
+function NavIcon(props: { kind: NavIconKey }): JSX.Element {
+  if (props.kind === "overview") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="3" y="3" width="7" height="7" rx="2" fill="none" stroke="currentColor" strokeWidth="1.7" />
+        <rect x="14" y="3" width="7" height="7" rx="2" fill="none" stroke="currentColor" strokeWidth="1.7" />
+        <rect x="3" y="14" width="7" height="7" rx="2" fill="none" stroke="currentColor" strokeWidth="1.7" />
+        <rect x="14" y="14" width="7" height="7" rx="2" fill="none" stroke="currentColor" strokeWidth="1.7" />
+      </svg>
+    );
+  }
+  if (props.kind === "config") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path
+          d="M9.6 3.8h4.8l.6 2.3c.5.2 1 .4 1.5.8l2.2-.7 2.4 4.1-1.7 1.6c.1.6.1 1.2 0 1.8l1.7 1.6-2.4 4.1-2.2-.7c-.5.3-1 .6-1.5.8l-.6 2.3H9.6L9 20.7c-.5-.2-1-.4-1.5-.8l-2.2.7-2.4-4.1 1.7-1.6a7 7 0 0 1 0-1.8l-1.7-1.6 2.4-4.1 2.2.7c.5-.3 1-.6 1.5-.8z"
+          fill="none"
+          stroke="currentColor"
+          strokeLinejoin="round"
+          strokeWidth="1.4"
+        />
+        <circle cx="12" cy="12" r="2.8" fill="none" stroke="currentColor" strokeWidth="1.7" />
+      </svg>
+    );
+  }
+  if (props.kind === "sessions") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="4" y="4" width="16" height="16" rx="4" fill="none" stroke="currentColor" strokeWidth="1.7" />
+        <path d="M8 10h8M8 14h5" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.7" />
+      </svg>
+    );
+  }
+  if (props.kind === "logs") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M5 5h14v14H5z" fill="none" stroke="currentColor" strokeWidth="1.7" />
+        <path d="M8 9h8M8 12h8M8 15h5" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.7" />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" strokeWidth="1.7" />
+      <path d="m12 6 1.8 3.7 4.1.6-3 2.9.7 4.1-3.6-1.9-3.6 1.9.7-4.1-3-2.9 4.1-.6z" fill="none" stroke="currentColor" strokeLinejoin="round" strokeWidth="1.4" />
+    </svg>
+  );
+}
+
 function Card(props: {
   title: string;
   eyebrow: string;
   children: ReactNode;
   accent?: string;
   compact?: boolean;
+  className?: string;
 }): JSX.Element {
   return (
-    <section className={`card ${props.compact ? "card-compact" : ""}`}>
+    <section className={`card ${props.compact ? "card-compact" : ""} ${props.className ?? ""}`}>
       <header className="card-head">
         <div>
           <span className="section-kicker">{props.eyebrow}</span>

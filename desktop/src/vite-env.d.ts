@@ -4,6 +4,6 @@ import type { DesktopBridge } from "@shared/api";
 
 declare global {
   interface Window {
-    tiyaDesktop: DesktopBridge;
+    tiyaDesktop?: DesktopBridge;
   }
 }
